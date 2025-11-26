@@ -1,0 +1,15 @@
+convert.py
+__pycache__/
+.ipynb_checkpoints
+.DS_Store
+.vscode/
+*.ptb
+plumed_meta.log
+plumed_equil.log
+log.lammps
+HILLS
+COLVAR
+COLVAR_pre
+fes.dat
+nohup.out
+traj.lammpstrj

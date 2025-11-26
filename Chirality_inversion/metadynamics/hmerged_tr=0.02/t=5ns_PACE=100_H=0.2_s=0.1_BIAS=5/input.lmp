@@ -1,0 +1,55 @@
+dimension       3
+units           real
+boundary        p p p 
+atom_style      atomic
+
+# --- VARIABLES ---
+variable        plumedPre   string "plumed_pre.dat"
+variable        plumedMeta  string "plumed_meta.dat"
+variable        preSteps    equal 500
+variable        metaSteps   equal 5000000
+variable        seed        index 22
+
+neighbor        2.0 bin
+neigh_modify    every 10 delay 0 check yes
+comm_modify     mode single cutoff 12.0
+newton          on
+
+# --- LOAD DATA ---
+read_data       ../../02_structure/hmerged_val=idx5_shuffle.lmp
+
+# --- MODEL ---
+plugin load     libchemtrain.so
+pair_style      chemtrain_deploy cuda12 0.4
+pair_coeff      * * ../../model/export_model_Ala2_hmerged_corr=2_tr=0.02.ptb 1.1 1.1
+
+# --- SETUP DYNAMICS ---
+velocity        all create 300. ${seed} # create velocity boltzmann dist at T=300K
+velocity        all zero linear     # shift mean of velocity dist to 0 
+fix             1 all nve   
+fix             2 all langevin 300. 300. 100. ${seed} zero yes  # T=300, damping=100
+timestep        1
+
+# Save coordinates
+dump            4 all custom 1000 traj.lammpstrj id type xs ys zs
+dump_modify     4 sort id
+
+# --- EQUILIBRATION ---
+# Use a unique ID for the specific plumed fix
+fix             plumed_equil all plumed plumedfile ${plumedPre} outfile plumed_equil.log
+
+thermo          100
+thermo_style    custom step pe ke etotal temp vol
+
+# Stage 1: Unbiased run (extending equilibration)
+run             ${preSteps}
+
+# --- METADYNAMICS ---
+# Correctly remove the previous plumed fix
+unfix           plumed_equil
+
+# Apply the new metadynamics fix
+fix             plumed_meta all plumed plumedfile ${plumedMeta} outfile plumed_meta.log
+
+# Stage 2: Metadynamics run
+run             ${metaSteps}

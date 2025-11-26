@@ -1,0 +1,18 @@
+# --- MATCH LAMMPS UNITS ---
+UNITS LENGTH=A TIME=fs ENERGY=kcal/mol
+
+# --- 1. CV DEFINITION (Unchanged) ---
+chi: TORSION ATOMS=4,5,6,7
+
+# --- 2. STANDARD METADYNAMICS ---
+metad: METAD ...
+   ARG=chi
+   PACE=200          # Deposit more often (since hills are smaller)
+   HEIGHT=0.1       # Very small hills for high-resolution/smooth FES
+   SIGMA=0.15        # Slightly wider to smooth out "bumps"
+   FILE=HILLS
+   BIASFACTOR=10     # Keep this high (18 kcal barrier requires it)
+   TEMP=300.0
+...
+# --- 3. OUTPUT ---
+PRINT ARG=chi,metad.bias STRIDE=1000 FILE=COLVAR
