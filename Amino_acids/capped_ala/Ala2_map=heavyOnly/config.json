@@ -1,0 +1,17 @@
+{
+    "hidden_irreps": "32x0e + 32x1o",
+    "readout_mlp_irreps": "16x0e",
+    "output_irreps": "1x0e",
+    "max_ell": 3,
+    "num_interactions": 2,
+    "correlation": 2,
+    "r_cutoff": 0.5,
+    "int-irreps": "o3_restricted",
+    "type": "CG",
+    "mol": "ala2",
+    "CG_map": "heavyOnly",
+    "ttot": "500ns",
+    "train_ratio": 0.9,
+    "val_ratio": 0.1,
+    "PRNGKey_seed": 11
+}

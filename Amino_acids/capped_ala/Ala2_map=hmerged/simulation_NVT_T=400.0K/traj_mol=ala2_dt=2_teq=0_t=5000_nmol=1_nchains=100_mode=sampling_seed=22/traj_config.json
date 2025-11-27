@@ -1,0 +1,16 @@
+{
+    "gamma": 100.0,
+    "PRNGKey_seed": 22,
+    "print_every": 0.5,
+    "sim_mode": "sampling",
+    "sim_mol": "ala2",
+    "type": "CG",
+    "cg_map": "hmerged",
+    "n_chains": 100,
+    "kT": 3.32580428,
+    "T": 400.0,
+    "ensemble": "NVT",
+    "t_eq": 0,
+    "t_total": 5000,
+    "dt": 0.002
+}
