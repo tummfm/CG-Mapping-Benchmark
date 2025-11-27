@@ -1,0 +1,67 @@
+nohup: ignoring input
+/home/franz/miniconda3/envs/supramol/lib/python3.11/site-packages/jax/_src/numpy/reductions.py:221: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/google/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+/home/franz/miniconda3/envs/supramol/lib/python3.11/site-packages/jax/_src/numpy/reductions.py:221: UserWarning: Explicitly requested dtype <class 'jax.numpy.float64'> requested in sum is not available, and will be truncated to dtype float32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/google/jax#current-gotchas for more.
+  return _reduction(a, "sum", np.sum, lax.add, 0, preproc=_cast_to_numeric,
+--------------------------------------------------
+Found MACE config: hidden_irreps: 32x0e + 32x1o
+Found MACE config: readout_mlp_irreps: 16x0e
+Found MACE config: output_irreps: 1x0e
+Found MACE config: max_ell: 3
+Found MACE config: num_interactions: 2
+Found MACE config: correlation: 2
+Found MACE config: r_cutoff: 0.7
+Found MACE config: n_radial_basis: 8
+Found MACE config: mol: hexane
+Found MACE config: type: CG
+Found MACE config: CG_map: three-site
+Found MACE config: nstxout: 200
+Found MACE config: ttot: 100
+Found MACE config: VOTCA: True
+Found MACE config: train_ratio: 0.9
+Found MACE config: val_ratio: 0.1
+Found MACE config: PRNGKey_seed: 11
+--------------------------------------------------
+Using Sim config: gamma: 100.0
+Using Sim config: dt_values_fs: [2]
+Using Sim config: PRNGKey_seed: 22
+Using Sim config: print_every: 0.5
+Using Sim config: sim_mode: speed
+Using Sim config: sim_mol: hexane
+Using Sim config: kT: 2.49435321
+Using Sim config: ensemble: NVT
+Using Sim config: n_chains: 1
+Using Sim config: t_eq: 0
+Using Sim config: t_total: 1000
+Using Sim config: type: CG
+Using Sim config: cg_map: three-site
+--------------------------------------------------
+Loading hexane dataset from: /home/franz/hexane/hexane_ttot=100ns_dt=1fs_nstxout=200.npz
+Original positions: -0.14653702080249786 to 2.9580318927764893
+Scale dataset by 1 for R and 1 for U.
+Original positions: -0.14069752395153046 to 2.932737112045288
+Scale dataset by 1 for R and 1 for U.
+Original positions: 0.0010020732879638672 to 2.7953383922576904
+Scale dataset by 1 for R and 1 for U.
+Training set size: 450000
+Validation set size: 50000
+Original positions: 0.0 to 2.794921875
+Scale dataset by 1 for R and 1 for U.
+Original positions: 0.0 to 2.794921875
+Scale dataset by 1 for R and 1 for U.
+Original positions: 0.005045687779784203 to 2.794921875
+Scale dataset by 1 for R and 1 for U.
+The dataset has max. 30 neighbors per particle and max. 6026 edges in total.
+Max neighbors: 30, max edges: 6026
+
+Starting simulation for dt = 2 fs (0.002 ps)...
+Use default box
+[MACE] Use default mask
+Use default box
+Use default box
+Use default box
+Use default box
+Use default box
+Simulation completed in 870.54 seconds.
+Performance: 99.25 ns/day
+Finished dt = 2 fs. Results saved to /home/franz/model_out/Hexane_tr=0.9_CG_epochs=50_map=three-site_hirreps=32x0e+32x1o_maxEll=3_batch=32_lr=0.001_rcut=0.7_corr=2_int=2_nrb=8_nstxout=200-100ns_RUN=1/simulation_NVT/traj_mol=hexane_dt=2_teq=0_t=1000_nmol=100_nchains=1_mode=speed_seed=22/.
