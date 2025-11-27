@@ -1,3 +1,5 @@
+> **_NOTE:_** Initial code release. More extensive documentation will be added soon.
+
 # CG Mapping Benchmark 
 Testing different coarse-graining (CG) mappings with classical and machine learning potentials (MLPs).
 
