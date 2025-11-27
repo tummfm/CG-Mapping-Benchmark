@@ -1,0 +1,7 @@
+{
+    "batch_size": 32,
+    "init_lr": 0.001,
+    "num_epochs": 50,
+    "decay_rate": 1.0,
+    "optimizer": "adam+decay"
+}

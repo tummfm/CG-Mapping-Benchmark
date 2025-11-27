@@ -1,0 +1,15 @@
+{
+    "gamma": 100.0,
+    "PRNGKey_seed": 0,
+    "print_every": 0.5,
+    "sim_mode": "helix",
+    "sim_mol": "ala15",
+    "type": "CG",
+    "cg_map": "coreMap2",
+    "n_chains": 100,
+    "kT": 2.49435321,
+    "ensemble": "NVT",
+    "t_eq": 0,
+    "t_total": 5000,
+    "dt": 0.002
+}
