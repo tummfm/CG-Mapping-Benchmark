@@ -5,15 +5,12 @@
     "max_ell": 3,
     "num_interactions": 2,
     "correlation": 3,
-    "r_cutoff": 0.55,
     "n_radial_basis": 8,
+    "r_cutoff": 0.55,
     "mol": "hexane",
-    "type": "CG",
     "CG_map": "three-site",
-    "nstxout": 200,
-    "ttot": 100,
-    "VOTCA": true,
     "train_ratio": 0.9,
     "val_ratio": 0.1,
-    "PRNGKey_seed": 22
+    "PRNGKey_seed": 22,
+    "type": "CG"
 }
