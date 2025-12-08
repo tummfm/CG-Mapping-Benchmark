@@ -1339,3 +1339,62 @@ def scale_dataset(dataset, scale_R, scale_U, fractional=True):
 
     return dataset
 
+
+
+
+def plot_histogram_free_energy_simple(
+    ax: Axes,
+    phi: jnp.ndarray,
+    psi: jnp.ndarray,
+    kbt: float,
+    degrees: bool = True,
+    ylabel: bool = False,
+    title: str = "",
+    bins: int = 60
+):
+    """
+    Plot 2D free energy histogram for alanine from the dihedral angles.
+    
+    Parameters
+    ----------
+    ax : Axes
+        Matplotlib axes object to plot on
+    phi : jnp.ndarray
+        Phi dihedral angles
+    psi : jnp.ndarray
+        Psi dihedral angles
+    kbt : float
+        Temperature in energy units (kT)
+    degrees : bool, optional
+        Whether angles are in degrees (default: True)
+    ylabel : bool, optional
+        Whether to add y-axis label (default: False)
+    title : str, optional
+        Title for the plot (default: "")
+        
+    Returns
+    -------
+    tuple[Axes, QuadMesh]
+        The modified matplotlib axes object and the colormap mesh
+    """
+    cmap = plt.get_cmap('viridis')
+
+    if degrees:
+        phi = jnp.deg2rad(phi)
+        psi = jnp.deg2rad(psi)
+
+    h, x_edges, y_edges = jnp.histogram2d(phi, psi, bins=bins, density=True)
+
+    h = jnp.log(h) * -(kbt / 4.184)
+    x, y = onp.meshgrid(x_edges, y_edges)
+
+    cax = ax.pcolormesh(x, y, h.T, cmap=cmap, vmax=5.25)
+    ax.set_xlabel('$\phi$ [rad]')
+    if ylabel:
+        ax.set_ylabel('$\psi$ [rad]')
+    ax.set_title(title)
+    
+    ax.set_ylim([-jnp.pi, jnp.pi])
+    ax.set_xlim([-jnp.pi, jnp.pi])
+    
+    return ax, cax

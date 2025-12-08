@@ -380,10 +380,10 @@ def plot_ramachandran(
         Directory to save the plot.
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-    ax1, c1 = utils.plot_histogram_free_energy(ax1, AT_phi, AT_psi, kT, degrees=True, ylabel=True)
+    ax1, c1 = utils.plot_histogram_free_energy_simple(ax1, AT_phi, AT_psi, kT)
     ax1.set_title('Reference')
     plt.colorbar(c1, ax=ax1, label='Free energy [kcal/mol]')
-    ax2, c2 = utils.plot_histogram_free_energy(ax2, Traj_phi, Traj_psi, kT, degrees=True)
+    ax2, c2 = utils.plot_histogram_free_energy_simple(ax2, Traj_phi, Traj_psi, kT)
     ax2.set_title('Simulation')
     plt.colorbar(c2, ax=ax2, label='Free energy [kcal/mol]')
     plt.tight_layout()
@@ -463,29 +463,31 @@ def vis_ala2(traj_path, config, type='AT', name='Simulation', dataset=None, cg_m
 
     # selection
     if type == 'AT':
-        phi_indices = [4, 6, 7, 8]
-        psi_indices = [6, 7, 8, 16]
-        pairs = [(4, 6), (6, 7), (7, 8)]
+        phi_indices = [4, 6, 8, 14]
+        psi_indices = [6, 8, 14, 16]
+        pairs = [(4, 6), (6, 8), (8, 14)]
         ref_coords = np.concatenate([
-            dataset.dataset_X['training']['R'],
-            dataset.dataset_X['validation']['R'],
-            dataset.dataset_X['testing']['R']
+            dataset.dataset_U['training']['R'],
+            dataset.dataset_U['validation']['R'],
+            dataset.dataset_U['testing']['R']
         ], axis=0)
     else:
         maps = {
-            'hmerged': ([1, 3, 4, 5], [3, 4, 5, 8], [(1,3),(3,4),(4,5)]),
-            'heavyOnly': ([1, 3, 4, 5], [3, 4, 5, 8], [(1,3),(3,4),(4,5)]),
-            'heavyOnlyMap2': ([1, 3, 4, 5], [3, 4, 5, 8], [(1,3),(3,4),(4,5)]),
+            'hmerged': ([1, 3, 4, 6], [3, 4, 6, 8], [(1,3),(3,4),(4,6)]),
+            'heavyOnly': ([1, 3, 4, 6], [3, 4, 6, 8], [(1,3),(3,4),(4,6)]),
+            'heavyOnlyMap2': ([1, 3, 4, 6], [3, 4, 6, 8], [(1,3),(3,4),(4,6)]),
             'core': ([0,1,2,3], [1,2,3,4], [(0,1),(1,2),(2,3)]),
+            'coreSingle': ([0,1,2,3], [1,2,3,4], [(0,1),(1,2),(2,3)]),
             'coreMap2': ([0,1,2,3], [1,2,3,4], [(0,1),(1,2),(2,3)]),
-            'coreBeta': ([0,1,2,3], [1,2,3,5], [(0,1),(1,2),(2,3)]),
-            'coreBetaMap2': ([0,1,2,3], [1,2,3,5], [(0,1),(1,2),(2,3)]),
+            'coreBeta': ([0,1,2,4], [1,2,4,5], [(0,1),(1,2),(2,4)]),
+            'coreBetaMap2': ([0,1,2,4], [1,2,4,5], [(0,1),(1,2),(2,4)]),
+            'coreBetaSingle': ([0,1,2,4], [1,2,4,5], [(0,1),(1,2),(2,4)]),
         }
         phi_indices, psi_indices, pairs = maps[cg_map]
         ref_coords = np.concatenate([
-                    dataset.cg_dataset_X['training']['R'],
-                    dataset.cg_dataset_X['validation']['R'],
-                    dataset.cg_dataset_X['testing']['R']
+                    dataset.cg_dataset_U['training']['R'],
+                    dataset.cg_dataset_U['validation']['R'],
+                    dataset.cg_dataset_U['testing']['R']
                 ], axis=0)
     traj_coords, aux = load_trajectory(traj_path)
     disp_fn, _ = periodic_displacement(box, True)
@@ -679,10 +681,7 @@ def plot_bond_angle_correlation(ref_coords, traj_coords, angle_idcs, bond_idcs, 
     plt.close(fig)
 
 
-
-
-    
-def vis_hexane(traj_path, type='AT', name='Simulation', dataset=None, cg_map='six-site', nmol=100):
+def vis_hexane(traj_path, config, type='AT', name='Simulation', dataset=None, cg_map='six-site', nmol=100):
     box = dataset.box
     outpath = prepare_output_dir(traj_path)
     config = json.load(open(os.path.join(os.path.dirname(traj_path), 'traj_config.json'), 'r'))

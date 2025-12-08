@@ -150,7 +150,7 @@ class Hexane_Map:
             },
             "four-site": {
                 "indices": self._get_four_site_indices(),
-                "cg_species": np.array([2, 1, 1, 2] * self.n_replicas),
+                "cg_species": np.array([1, 2, 2, 1] * self.n_replicas),
             },
             "three-site": {
                 "indices": self._get_three_site_indices(),
@@ -159,6 +159,10 @@ class Hexane_Map:
             "two-site": {
                 "indices": self._get_two_site_indices(),
                 "cg_species": np.array([1] * 2 * self.n_replicas),
+            },
+            "two-site-Map2": {
+                "indices": self._get_two_site_indices(),
+                "cg_species": np.array([1, 2] * self.n_replicas),
             },
             "A3": {
                 "indices": self._get_A3_site_indices(),
@@ -447,6 +451,33 @@ class Ala2_Map:
             ],
             "cg_species": np.array([1, 2, 1, 1, 2]),  # 1=C, 2=N
         },
+        "coreSingle": {
+            "indices": [
+                -1,
+                -1,
+                -1,
+                -1,
+                0,
+                -1,  # C
+                1,
+                -1,  # N
+                2,
+                -1,  # Ca
+                -1,
+                -1,
+                -1,
+                -1,  # CB
+                3,
+                -1,  # C
+                4,
+                -1,  # N
+                -1,
+                -1,
+                -1,
+                -1,
+            ],
+            "cg_species": np.array([1, 1, 1, 1, 1]),  # 1=C, 2=N
+        },
         "coreMap2": {
             "indices": [
                 -1,
@@ -536,20 +567,20 @@ class Ala2_Map:
                 -1,
                 -1,
                 -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                3,
+                0, # C_ACE
+                -1,  
+                1, # N_ALA
+                -1,  
+                2, # CA
+                -1,  
+                3, # CB
                 -1,
                 -1,
-                -1,  # CB
-                4,
-                -1,  # C
-                5,
-                -1,  # N
+                -1,  
+                4,# C_ALA
+                -1,  
+                5, # N_NME
+                -1,  
                 -1,
                 -1,
                 -1,

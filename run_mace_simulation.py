@@ -5,6 +5,7 @@ import os
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")
 parser.add_argument("--model", type=str, help="Model path", required=True) # Pass path to best_params.pkl
+parser.add_argument("--mol", type=str, help="Molecule to simulate", required=True)
 parser.add_argument(
     "--verbose", action="store_true", help="Enable verbose output", default=True
 )
@@ -14,8 +15,7 @@ args = parser.parse_args()
 if args.device:
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.97"
-# python run_simulation_ala2.py --model model_out/Ala2_AT_epochs=15/best_params.pkl --device 2
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 
 import json
 import pickle
@@ -31,8 +31,8 @@ from jax import random
 from chemtrain.ensemble import sampling
 from jax_md import partition, space, simulate
 from jax_md_mod import custom_quantity
-
 import dataset
+from config import DEFAULT_SIM_CONFIG as SIM_CONFIG
 
 # -------------------------
 # Configuration handling
@@ -57,22 +57,8 @@ if os.path.exists(train_config_path):
 else:
     raise FileNotFoundError(f"Train config file {train_config_path} not found.")
 
-CONFIG_DEFAULTS = {
-    "gamma": 100.0, # Friction coefficient in 1/ps (for NVT Langevin)
-    "dt_values_fs": [2],  # Add more dt values as needed
-    "print_every": 0.5,  # Save frame every 0.5 ps
-    "sim_mode": "sampling",  # simulation mode: 'sampling', 'stability', 'helix', 'speed'
-    "sim_mol": "ala2", # Choose molecule for simulation
-    "ensemble": "NVT", # NVT or NVE
-    "t_eq": 5,  # Equlibration time in ps
-    "t_total": 50,  # Total simulation time in ps (- t_eq)
-    "n_chains": 10, # Number of simulations (parallel)
-    "kT": 300.0 * quantity.kb,  # Temperature in energy units
-    "T": 300.0,
-    "PRNGKey_seed": 22,
-}
-
-config = CONFIG_DEFAULTS.copy()
+config = SIM_CONFIG.copy()
+config["sim_mol"] = args.mol
 config["type"] = MACE_CONFIG["type"]
 config["cg_map"] = MACE_CONFIG.get("CG_map", None)
 
@@ -84,7 +70,6 @@ if args.verbose:
     for key, value in config.items():
         print(f"Using Sim config: {key}: {value}")
     print("-" * 50)
-
 
 # -------------------------
 # Load dataset
@@ -182,6 +167,7 @@ init_fn, gnn_energy_fn = mace.mace_neighborlist_pp(
     readout_mlp_irreps=MACE_CONFIG["readout_mlp_irreps"],
     output_irreps=MACE_CONFIG["output_irreps"],
     n_radial_basis=MACE_CONFIG["n_radial_basis"],
+    positive_species=True,
 )
 
 
