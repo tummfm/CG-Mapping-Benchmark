@@ -13,5 +13,5 @@
     "ttot": "500ns",
     "train_ratio": 0.9,
     "val_ratio": 0.1,
-    "PRNGKey_seed": 12
+    "PRNGKey_seed": 22
 }

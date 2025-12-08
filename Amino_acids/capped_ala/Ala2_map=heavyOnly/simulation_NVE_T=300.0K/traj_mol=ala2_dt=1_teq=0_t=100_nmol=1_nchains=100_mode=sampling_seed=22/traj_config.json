@@ -2,15 +2,15 @@
     "gamma": 100.0,
     "PRNGKey_seed": 22,
     "print_every": 0.01,
+    "sim_mode": "sampling",
     "sim_mol": "ala2",
     "type": "CG",
     "cg_map": "heavyOnly",
     "n_chains": 100,
     "kT": 2.49435321,
-    "T": 300,
+    "T": 300.0,
     "ensemble": "NVE",
     "t_eq": 0,
     "t_total": 100,
-    "sim_mode": "sampling",
     "dt": 0.001
 }
