@@ -6,7 +6,6 @@
     "num_interactions": 2,
     "correlation": 2,
     "r_cutoff": 0.5,
-    "n_radial_basis": 8,
     "type": "CG",
     "mol": "ala15",
     "CG_map": "coreBetaMap2",
