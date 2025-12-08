@@ -6,7 +6,7 @@ parser.add_argument("--device", type=str, help="GPU or MIG UUID")
 parser.add_argument("--cgmap", type=str, help="CG mapping to use", required=True)
 parser.add_argument("--mol", type=str, help="Molecule to use", required=True)
 parser.add_argument(
-    "--rcut", type=float, help="Cutoff radius for neighbor list", default=5.0
+    "--rcut", type=float, help="Cutoff radius for neighbor list", default=0.5
 )
 parser.add_argument(
     "--verbose", action="store_true", help="Enable verbose output", default=False
@@ -15,7 +15,7 @@ args = parser.parse_args()
 
 if args.device:
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.97"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 
 import numpy as onp
 import optax
@@ -27,30 +27,11 @@ from chemtrain.trainers import trainers
 import json
 from jax import numpy as jnp, random, tree_util
 import dataset
+from constants import DEFAULT_MACE_CONFIG as MACE_CONFIG
 
-MACE_CONFIG = {
-    "hidden_irreps": "32x0e + 32x1o",
-    "readout_mlp_irreps": "16x0e",
-    "output_irreps": "1x0e",
-    "max_ell": 3,
-    "num_interactions": 2,
-    "correlation": 2,
-    "n_radial_basis": 8,
-    "r_cutoff": args.rcut,
-    "mol": args.mol, 
-    "CG_map": args.cgmap,
-    "train_ratio": 0.01,  # Ratio of training data
-    "val_ratio": 0.1,  # Ratio of validation data, rest is test data
-    "PRNGKey_seed": 22,
-}
-
-TRAIN_CONFIG = {
-    "batch_size": 32,
-    "init_lr": 0.001,
-    "num_epochs": 5,
-    "decay_rate": 0.9,
-    "optimizer": "adam+decay",
-}
+MACE_CONFIG["r_cutoff"] = args.rcut
+MACE_CONFIG["mol"] = args.mol 
+MACE_CONFIG["CG_map"] = args.cgmap
 MACE_CONFIG["type"] = "CG" if MACE_CONFIG["CG_map"] != "AT" else "AT"
 
 # -------------------------
@@ -92,9 +73,7 @@ if MACE_CONFIG["type"] == "AT":
     species = data.species
     masses = data.masses
     n_species = data.n_species
-    output_dir = f"MLP_train/{MACE_CONFIG['mol'].capitalize()}_map={MACE_CONFIG['CG_map']}_tr={MACE_CONFIG['train_ratio']}"
-    if MACE_CONFIG["mol"] == "hexane":
-        output_dir += f"_nstxout={MACE_CONFIG['nstxout']}/"
+    
 # CG
 elif MACE_CONFIG["type"] == "CG":
     data.coarse_grain(map=MACE_CONFIG["CG_map"])
@@ -102,11 +81,11 @@ elif MACE_CONFIG["type"] == "CG":
     species = data.cg_species
     masses = data.cg_masses
     n_species = data.n_cg_species
-    output_dir = f"MLP_train/{MACE_CONFIG['mol'].capitalize()}_map={MACE_CONFIG['CG_map']}_tr={MACE_CONFIG['train_ratio']}"
 else:
     raise ValueError("Invalid simulation type. Use 'AT' or 'CG'.")
-os.makedirs(output_dir, exist_ok=True)
 
+output_dir = f"MLP_train/{MACE_CONFIG['mol'].capitalize()}_map={MACE_CONFIG['CG_map']}_tr={MACE_CONFIG['train_ratio']}_rcut={MACE_CONFIG['r_cutoff']}_epochs={TRAIN_CONFIG['num_epochs']}_int={MACE_CONFIG['num_interactions']}_corr={MACE_CONFIG['correlation']}_seed={MACE_CONFIG['PRNGKey_seed']}"
+os.makedirs(output_dir, exist_ok=True)
 
 # -------------------------
 # Setup neighbor list and MACE model
@@ -147,6 +126,7 @@ init_fn, gnn_energy_fn = mace.mace_neighborlist_pp(
     readout_mlp_irreps=MACE_CONFIG["readout_mlp_irreps"],
     output_irreps=MACE_CONFIG["output_irreps"],
     n_radial_basis=MACE_CONFIG["n_radial_basis"],
+    positive_species=True,
 )
 
 
@@ -172,6 +152,7 @@ species_init = jnp.asarray(dataset["training"]["species"][0])
 mask_init = jnp.asarray(dataset["training"]["mask"][0])
 init_params = init_fn(key, r_init, nbrs_init, species=species_init, mask=mask_init)
 nbrs_init = nbrs_init.update(r_init, mask=mask_init)
+
 
 # -------------------------
 # Setup optimizer

@@ -13,3 +13,11 @@ COLVAR_pre
 fes.dat
 nohup.out
 traj.lammpstrj
+*.pkl
+*.npy
+*.npz
+*.log
+*.xtc
+*.trr
+MLP_train*/
+setup.py
