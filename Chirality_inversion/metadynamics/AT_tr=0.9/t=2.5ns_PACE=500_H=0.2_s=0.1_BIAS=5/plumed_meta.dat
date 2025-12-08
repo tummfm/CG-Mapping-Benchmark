@@ -7,7 +7,7 @@ chi: TORSION ATOMS=7,9,11,15
 # --- 2. STANDARD METADYNAMICS ---
 metad: METAD ...
    ARG=chi
-   PACE=100          # Deposit more often (since hills are smaller)
+   PACE=500          # Deposit more often (since hills are smaller)
    HEIGHT=0.2       # Very small hills for high-resolution/smooth FES
    SIGMA=0.1        # Slightly wider to smooth out "bumps"
    FILE=HILLS

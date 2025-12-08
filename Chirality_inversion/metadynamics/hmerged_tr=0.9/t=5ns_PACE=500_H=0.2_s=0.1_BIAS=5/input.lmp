@@ -7,7 +7,7 @@ atom_style      atomic
 variable        plumedPre   string "plumed_pre.dat"
 variable        plumedMeta  string "plumed_meta.dat"
 variable        preSteps    equal 500
-variable        metaSteps   equal 500000
+variable        metaSteps   equal 5000000
 variable        seed        index 22
 
 neighbor        2.0 bin
@@ -16,12 +16,12 @@ comm_modify     mode single cutoff 12.0
 newton          on
 
 # --- LOAD DATA ---
-read_data       ../../02_structure/coreBetaMap2_val=idx5_shuffle.lmp
+read_data       /home/franz/CG-Mapping-Benchmark/Chirality_inversion/structures/hmerged_val=idx5_shuffle.lmp
 
 # --- MODEL ---
 plugin load     libchemtrain.so
-pair_style      chemtrain_deploy cuda12 0.5
-pair_coeff      * * ../../model/export_model_Ala2_coreBetaMap2.ptb 1.1 1.1
+pair_style      chemtrain_deploy cuda12 0.2
+pair_coeff      * * /home/franz/CG-Mapping-Benchmark/Chirality_inversion/model/export_model_hmerged.ptb 1.1 1.1
 
 # --- SETUP DYNAMICS ---
 velocity        all create 300. ${seed} # create velocity boltzmann dist at T=300K

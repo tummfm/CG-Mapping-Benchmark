@@ -16,12 +16,12 @@ comm_modify     mode single cutoff 12.0
 newton          on
 
 # --- LOAD DATA ---
-read_data       ../../02_structure/heavyOnly_val=idx5_shuffle.lmp
+read_data       /home/franz/CG-Mapping-Benchmark/Chirality_inversion/structures/heavyOnly_val=idx5_shuffle.lmp
 
 # --- MODEL ---
 plugin load     libchemtrain.so
 pair_style      chemtrain_deploy cuda12 0.4
-pair_coeff      * * ../../model/export_model_Ala2_heavyOnly.ptb 1.1 1.1
+pair_coeff      * * /home/franz/CG-Mapping-Benchmark/Chirality_inversion/model/export_model_heavyOnly.ptb 1.1 1.1
 
 # --- SETUP DYNAMICS ---
 velocity        all create 300. ${seed} # create velocity boltzmann dist at T=300K
