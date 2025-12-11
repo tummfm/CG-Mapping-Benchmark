@@ -1,6 +1,9 @@
 import argparse
 import os
+import sys
 
+# Add parent directory to path to import cgbench
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")
@@ -31,8 +34,8 @@ from jax import random
 from chemtrain.ensemble import sampling
 from jax_md import partition, space, simulate
 from jax_md_mod import custom_quantity
-import dataset
-from config import DEFAULT_SIM_CONFIG as SIM_CONFIG
+from cgbench.core import dataset
+from cgbench.core.config import DEFAULT_SIM_CONFIG as SIM_CONFIG
 
 # -------------------------
 # Configuration handling
@@ -309,7 +312,7 @@ def init_simulator(
 
 
 def visualise(traj_path, dataset):
-    import visualise_traj
+    from cgbench.utils import visualization as visualise_traj
     vis_fn_map = {
         'ala2': visualise_traj.vis_ala2,
         'hexane': visualise_traj.vis_hexane,

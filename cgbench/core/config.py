@@ -1,7 +1,7 @@
 from chemtrain import quantity
 
 Dataset_paths = {
-    'hexane': 'Reference_simulations/hexane/hexane_ttot=100ns_dt=1fs_nstxout=200.npz',
+    'hexane': 'data/reference_simulations/hexane/hexane_ttot=100ns_dt=1fs_nstxout=200.npz',
     'ala2': '/home/franz/l-ala2_ttot=500ns_dt=0.5fs_nstxout=2000.npz',
     'pro2': '/home/franz/l-pro2_ttot=500ns_dt=0.5fs_nstxout=2000.npz',
     'thr2': '/home/franz/l-thr2_ttot=500ns_dt=0.5fs_nstxout=2000.npz',

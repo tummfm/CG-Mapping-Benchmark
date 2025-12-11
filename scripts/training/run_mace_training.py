@@ -1,5 +1,9 @@
 import argparse
 import os
+import sys
+
+# Add parent directory to path to import cgbench
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")
@@ -26,8 +30,8 @@ from jax_md import partition, space
 from chemtrain.trainers import trainers
 import json
 from jax import numpy as jnp, random, tree_util
-import dataset
-from constants import DEFAULT_MACE_CONFIG as MACE_CONFIG
+from cgbench.core import dataset
+from cgbench.core.config import DEFAULT_MACE_CONFIG as MACE_CONFIG, DEFAULT_TRAIN_CONFIG as TRAIN_CONFIG
 
 MACE_CONFIG["r_cutoff"] = args.rcut
 MACE_CONFIG["mol"] = args.mol 
@@ -84,7 +88,7 @@ elif MACE_CONFIG["type"] == "CG":
 else:
     raise ValueError("Invalid simulation type. Use 'AT' or 'CG'.")
 
-output_dir = f"MLP_train/{MACE_CONFIG['mol'].capitalize()}_map={MACE_CONFIG['CG_map']}_tr={MACE_CONFIG['train_ratio']}_rcut={MACE_CONFIG['r_cutoff']}_epochs={TRAIN_CONFIG['num_epochs']}_int={MACE_CONFIG['num_interactions']}_corr={MACE_CONFIG['correlation']}_seed={MACE_CONFIG['PRNGKey_seed']}"
+output_dir = f"outputs/MLP_train/{MACE_CONFIG['mol'].capitalize()}_map={MACE_CONFIG['CG_map']}_tr={MACE_CONFIG['train_ratio']}_rcut={MACE_CONFIG['r_cutoff']}_epochs={TRAIN_CONFIG['num_epochs']}_int={MACE_CONFIG['num_interactions']}_corr={MACE_CONFIG['correlation']}_seed={MACE_CONFIG['PRNGKey_seed']}"
 os.makedirs(output_dir, exist_ok=True)
 
 # -------------------------
@@ -214,7 +218,7 @@ with open(f"{output_dir}/config.json", "w") as f:
 with open(f"{output_dir}/train_config.json", "w") as f:
     json.dump(TRAIN_CONFIG, f, indent=4)
 
-from utils import plot_predictions, plot_convergence
+from cgbench.utils.helpers import plot_predictions, plot_convergence
 
 # Plot training convergence
 plot_convergence(trainer_fm, output_dir)

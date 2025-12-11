@@ -6,7 +6,7 @@ import numpy as np
 from jax import numpy as jnp, jit
 from jax_md import space
 from chemtrain import quantity
-import utils
+from . import helpers as utils
 from scipy.stats import gaussian_kde
 import jax
 

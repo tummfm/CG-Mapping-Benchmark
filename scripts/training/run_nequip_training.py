@@ -1,5 +1,9 @@
 import argparse
 import os
+import sys
+
+# Add parent directory to path to import cgbench
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")
@@ -26,14 +30,15 @@ from jax_md import partition, space
 from chemtrain.trainers import trainers
 import json
 from jax import numpy as jnp, random, tree_util
-import dataset
-from constants import DEFAULT_NEQUIP_CONFIG as NEQUIP_CONFIG, DEFAULT_TRAIN_CONFIG as TRAIN_CONFIG
+from cgbench.core import dataset
+from cgbench.core.config import DEFAULT_NEQUIP_CONFIG, DEFAULT_TRAIN_CONFIG as TRAIN_CONFIG
 
-NEQUIP_CONFIG = {
+NEQUIP_CONFIG = DEFAULT_NEQUIP_CONFIG.copy()
+NEQUIP_CONFIG.update({
     "r_cutoff": args.rcut,
     "mol": args.mol, 
     "CG_map": args.cgmap,
-}
+})
 NEQUIP_CONFIG["type"] = "CG" if NEQUIP_CONFIG["CG_map"] != "AT" else "AT"
 
 # -------------------------
@@ -75,9 +80,9 @@ if NEQUIP_CONFIG["type"] == "AT":
     species = data.species
     masses = data.masses
     n_species = data.n_species
-    output_dir = f"MLP_train_Nequip/{NEQUIP_CONFIG['mol'].capitalize()}_map={NEQUIP_CONFIG['CG_map']}_tr={NEQUIP_CONFIG['train_ratio']}_epochs={TRAIN_CONFIG['num_epochs']}"
+    output_dir = f"outputs/MLP_train_Nequip/{NEQUIP_CONFIG['mol'].capitalize()}_map={NEQUIP_CONFIG['CG_map']}_tr={NEQUIP_CONFIG['train_ratio']}_epochs={TRAIN_CONFIG['num_epochs']}"
     if NEQUIP_CONFIG["mol"] == "hexane":
-        output_dir += f"_nstxout={NEQUIP_CONFIG['nstxout']}/"
+        output_dir += f"_nstxout={NEQUIP_CONFIG.get('nstxout', '')}/"
 # CG
 elif NEQUIP_CONFIG["type"] == "CG":
     data.coarse_grain(map=NEQUIP_CONFIG["CG_map"])
@@ -85,7 +90,7 @@ elif NEQUIP_CONFIG["type"] == "CG":
     species = data.cg_species
     masses = data.cg_masses
     n_species = data.n_cg_species
-    output_dir = f"MLP_train_nequip/{NEQUIP_CONFIG['mol'].capitalize()}_map={NEQUIP_CONFIG['CG_map']}_tr={NEQUIP_CONFIG['train_ratio']}_epochs={TRAIN_CONFIG['num_epochs']}"
+    output_dir = f"outputs/MLP_train_nequip/{NEQUIP_CONFIG['mol'].capitalize()}_map={NEQUIP_CONFIG['CG_map']}_tr={NEQUIP_CONFIG['train_ratio']}_epochs={TRAIN_CONFIG['num_epochs']}"
 else:
     raise ValueError("Invalid simulation type. Use 'AT' or 'CG'.")
 os.makedirs(output_dir, exist_ok=True)
@@ -210,7 +215,7 @@ with open(f"{output_dir}/config.json", "w") as f:
 with open(f"{output_dir}/train_config.json", "w") as f:
     json.dump(TRAIN_CONFIG, f, indent=4)
 
-from utils import plot_predictions, plot_convergence
+from cgbench.utils.helpers import plot_predictions, plot_convergence
 
 # Plot training convergence
 plot_convergence(trainer_fm, output_dir)

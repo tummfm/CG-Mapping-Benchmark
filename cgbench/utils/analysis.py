@@ -3,14 +3,11 @@ from jax import vmap
 from typing import Callable
 import matplotlib.pyplot as plt
 import numpy as np
-import utils
+from . import helpers as utils
 from chemtrain import quantity
 from jax import jit
 
-import numpy as np
 from scipy.interpolate import interp1d
-
-from matplotlib import pyplot as plt
 
 # Color, font size and line width variables
 color_ref = "#332288"

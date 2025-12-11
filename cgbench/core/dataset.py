@@ -3,9 +3,9 @@ import copy
 from jax_md import space
 from jax import numpy as jnp
 import numpy as np
-import utils 
-from mapping import Ala2_Map, Hexane_Map, Ala15_Map, Pro2_Map, Thr2_Map, Gly2_Map, map_dataset
-from config import Dataset_paths, SEED
+from ..utils import helpers as utils
+from .mapping import Ala2_Map, Hexane_Map, Ala15_Map, Pro2_Map, Thr2_Map, Gly2_Map, map_dataset
+from .config import Dataset_paths, SEED
 
 
 class BaseDataset:

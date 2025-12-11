@@ -1,8 +1,13 @@
 import os
+import sys
+
+# Add parent directory to path to import cgbench
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 import numpy as np
 import jax.numpy as jnp
 from jax import random
-from constants import SEED
+from cgbench.core.config import SEED
 
 def write_gro_for_chain(positions, mapping, n_mol, box_length,
                         out_path, title='cg hexane', filename='cg_hexane.gro'):
@@ -81,7 +86,7 @@ def write_chains_from_rinit(r_init, mapping, n_mol, box_length,
 ## CHANGE THESE TO ACTUAL PATHS 
 mapping = 'three-site'              
 target_dir = f'Classical_potential/model/map={mapping}'  
-path = f"../../Reference_simulations/hexane_ttot=100ns_dt=1fs_nstxout=200_CG={mapping}.npz"
+path = f"../../data/reference_simulations/hexane/hexane_ttot=100ns_dt=1fs_nstxout=200_CG={mapping}.npz"
 
 n_mol = 100
 n_chains = 10
