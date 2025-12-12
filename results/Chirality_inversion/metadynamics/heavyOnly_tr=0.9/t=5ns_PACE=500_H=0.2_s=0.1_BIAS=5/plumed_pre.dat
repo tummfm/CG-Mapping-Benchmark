@@ -1,0 +1,6 @@
+# Unbiased stage: just compute and print the CV
+UNITS LENGTH=A TIME=fs ENERGY=kcal/mol
+
+chi: TORSION ATOMS=4,5,6,7
+
+PRINT ARG=chi STRIDE=100 FILE=COLVAR_pre
