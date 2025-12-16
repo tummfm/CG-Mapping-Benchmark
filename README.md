@@ -3,6 +3,8 @@
 # CG Mapping Benchmark 
 Testing different coarse-graining (CG) mappings with classical and machine learning potentials (MLPs).
 
+![Benchmarked Systems](data/preview.png)
+
 ## Code Structure
 
 The repository is organized into the following structure:
