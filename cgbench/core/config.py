@@ -35,8 +35,8 @@ DEFAULT_NEQUIP_CONFIG = {
 
 DEFAULT_TRAIN_CONFIG = {
     "batch_size": 32,
-    "init_lr": 0.01,
-    "num_epochs": 12,
+    "init_lr": 0.001,
+    "num_epochs": 50,
     "decay_rate": 0.90,
     "optimizer": "adam+decay",
 }
@@ -52,5 +52,5 @@ DEFAULT_SIM_CONFIG = {
     "n_chains": 10, # Number of simulations (parallel)
     "kT": 300.0 * quantity.kb,  # Temperature in energy units
     "T": 300.0,
-    "PRNGKey_seed": 10,
+    "PRNGKey_seed": SEED,
 }
