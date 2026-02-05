@@ -1,4 +1,4 @@
-> **_NOTE:_** Initial code release. More extensive documentation will be added soon.
+> **_NOTE:_** Frozen repository for the JCIM publication "Mapping Still Matters: Coarse-graining with Machine Learning Potentials". Accessible ![here](https://pubs.acs.org/doi/10.1021/acs.jcim.5c03035).
 
 # CG Mapping Benchmark 
 Testing different coarse-graining (CG) mappings with classical and machine learning potentials (MLPs).
