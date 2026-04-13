@@ -2,7 +2,14 @@ from jax import numpy as jnp, lax
 import jax
 import functools
 import numpy as np
+import json
+import os
+from collections import defaultdict, deque
 
+
+# ---------------------------------------------------------------------------
+# Core map_dataset
+# ---------------------------------------------------------------------------
 
 def map_dataset(
     position_dataset, displacement_fn, shift_fn, c_map, d_map=None, force_dataset=None
@@ -18,30 +25,19 @@ def map_dataset(
 
         \\mathbf{F}_I = \\sum_{i \\in \\mathcal I_I} \\frac{d_{Ii}}{c_{Ii}} \\mathbf f_i.
 
-
     Args:
         position_dataset: Dataset of fine-scaled positions.
-        displacement_fn: Function to compute the displacement between two
-            sets of coordinates. Necessary to handle boundary conditions.
-        shift_fn: Ensures that the produced coordinates remain in the
-            box.
-        c_map: Matrix $c_{Ii}$ defining the linear mapping of positions.
-        d_map: Matrix $d_{Ii}$ defining the linear mapping of forces in combination
-            with $c_{Ii}$.
+        displacement_fn: Function to compute displacement (handles boundary conditions).
+        shift_fn: Ensures produced coordinates remain in the box.
+        c_map: Matrix defining the linear mapping of positions.
+        d_map: Matrix defining the linear mapping of forces.
         force_dataset: Dataset of fine-scaled forces.
 
     Returns:
-        Returns the coarse-grained positions and, if provided, coarse-grained
-        forces.
+        Coarse-grained positions and (if provided) coarse-grained forces.
 
     References:
-        .. [Noid2008] W. G. Noid, Jhih-Wei Chu, Gary S. Ayton, Vinod Krishna,
-           Sergei Izvekov, Gregory A. Voth, Avisek Das, Hans C. Andersen;
-           *The multiscale coarse-graining method. I. A rigorous bridge between
-           atomistic and coarse-grained models*. J. Chem. Phys. 28 June 2008;
-           128 (24): 244114. https://doi-org.eaccess.tum.edu/10.1063/1.2938860
-
-
+        .. [Noid2008] W. G. Noid et al.; J. Chem. Phys. 128 (24): 244114 (2008).
     """
 
     def _map_single(ipt, shift_fn, displacement_fn, c_map, d_map):
@@ -71,21 +67,35 @@ def map_dataset(
         d_map=d_map,
     )
 
-    debug = False
-    if debug:
-        first_frame = position_dataset[3]
-        first_force = force_dataset[3]
-        return _map_single((first_frame, first_force))
-
     return lax.map(_map_single, (position_dataset, force_dataset))
 
 
-# atomic‐mass lookup by symbol
-mass_map = {"H": 1.01, "C": 12.011, "N": 14.007, "O": 15.999}
-# atomic number to symbol mapping
-atomic_number_map = {1: "H", 6: "C", 7: "N", 8: "O"}
-atomic_number_map_reverse = {"H": 1, "C": 6, "N": 7, "O": 8}
+# ---------------------------------------------------------------------------
+# Atomic look-up tables
+# ---------------------------------------------------------------------------
 
+mass_map = {"H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06}
+atomic_number_map = {1: "H", 6: "C", 7: "N", 8: "O", 16: "S"}
+atomic_number_map_reverse = {"H": 1, "C": 6, "N": 7, "O": 8, "S": 16}
+
+
+# ---------------------------------------------------------------------------
+# residue_maps.json loading
+# ---------------------------------------------------------------------------
+
+def _default_residue_maps_path() -> str:
+    return os.path.join(os.path.dirname(__file__), "..", "..", "data", "residue_maps.json")
+
+
+@functools.lru_cache(maxsize=1)
+def _load_residue_maps_json() -> dict:
+    with open(_default_residue_maps_path(), "r") as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Mapping weight computation
+# ---------------------------------------------------------------------------
 
 @jax.jit
 def get_map_weights(
@@ -93,258 +103,558 @@ def get_map_weights(
     at_masses_arr: jnp.ndarray,
     cg_masses: jnp.ndarray,
 ) -> jnp.ndarray:
+    """Compute mass-weighted mapping matrix from atom→CG-site assignment.
+
+    Args:
+        map_arr:      (n_atoms,) int32 – CG site index per atom; -1 = excluded.
+        at_masses_arr:(n_atoms,) float32 – atomic masses.
+        cg_masses:    (n_cg,)   float32 – total mass per CG site.
+
+    Returns:
+        weights: (n_cg, n_atoms) float32 – row-normalised (rows sum to 1).
+    """
     valid = map_arr >= 0
     clipped = jnp.where(valid, map_arr, 0)
     onehot = jax.nn.one_hot(clipped, cg_masses.shape[0], dtype=jnp.float32).T
     onehot *= valid[None, :]
-    per_atom_w = at_masses_arr[None, :] / cg_masses[:, None]
-
     per_atom_w = jnp.where(
         cg_masses[:, None] > 0, at_masses_arr[None, :] / cg_masses[:, None], 0.0
     )
+    return onehot * per_atom_w
 
-    weights = onehot * per_atom_w
-    return weights
 
+# ---------------------------------------------------------------------------
+# CG bond-type computation from the atomistic graph
+# ---------------------------------------------------------------------------
+
+def compute_cg_bond_types(
+    at_bonds: list[tuple[int, int]],
+    mapping_indices: list[int],
+    max_sep: int = 4,
+) -> dict[str, list[list[int]]]:
+    """Compute CG-site bond types from the atomistic bond graph.
+
+    Uses a two-step approach:
+    1. Build a CG adjacency graph: two CG sites are adjacent if any atom in
+       one can reach any atom in the other through only unmapped intermediates.
+    2. BFS on the CG graph to get CG-level distances, then bucket:
+       - bond_0: CG distance 1 (directly bonded, 1-2)
+       - bond_1: CG distance 2 (1-3 in CG graph)
+       - bond_2: CG distance 3 (1-4 in CG graph)
+       - bond_3: CG distance 4 (1-5 in CG graph)
+
+    Args:
+        at_bonds:        List of 0-indexed (i, j) atomistic bond pairs.
+        mapping_indices: Per-atom CG-site assignment (-1 = excluded).
+        max_sep:         Maximum CG-graph path length to consider (default 4).
+
+    Returns:
+        Dict with keys bond_0 … bond_3, each a sorted list of [cg_i, cg_j] pairs.
+    """
+    adj: dict[int, set[int]] = defaultdict(set)
+    for i, j in at_bonds:
+        adj[i].add(j)
+        adj[j].add(i)
+
+    mapped_atoms = [i for i, cg in enumerate(mapping_indices) if cg >= 0]
+
+    # Step 1: build CG adjacency (traverse through unmapped intermediates).
+    cg_adj: dict[int, set[int]] = defaultdict(set)
+    for start in mapped_atoms:
+        cg_start = mapping_indices[start]
+        visited: set[int] = {start}
+        queue: deque[int] = deque([start])
+        while queue:
+            node = queue.popleft()
+            for nb in adj[node]:
+                if nb in visited:
+                    continue
+                visited.add(nb)
+                nb_cg = mapping_indices[nb]
+                if nb_cg >= 0:
+                    if nb_cg != cg_start:
+                        cg_adj[cg_start].add(nb_cg)
+                else:
+                    queue.append(nb)
+
+    # Step 2: BFS on CG graph for CG-level distances.
+    cg_sites = sorted(set(mapping_indices[i] for i in mapped_atoms))
+    cg_pair_min: dict[tuple[int, int], int] = {}
+
+    for start_cg in cg_sites:
+        dist_cg: dict[int, int] = {start_cg: 0}
+        queue_cg: deque[int] = deque([start_cg])
+        while queue_cg:
+            curr = queue_cg.popleft()
+            if dist_cg[curr] >= max_sep:
+                continue
+            for nb_cg in cg_adj[curr]:
+                if nb_cg not in dist_cg:
+                    dist_cg[nb_cg] = dist_cg[curr] + 1
+                    queue_cg.append(nb_cg)
+
+        for other_cg, d in dist_cg.items():
+            if d == 0:
+                continue
+            pair = (min(start_cg, other_cg), max(start_cg, other_cg))
+            if pair not in cg_pair_min or cg_pair_min[pair] > d:
+                cg_pair_min[pair] = d
+
+    buckets: dict[int, list[list[int]]] = {0: [], 1: [], 2: [], 3: []}
+    for (i, j), d in sorted(cg_pair_min.items()):
+        if 1 <= d <= 4:
+            buckets[d - 1].append([i, j])
+
+    return {
+        "bond_0": buckets[0],
+        "bond_1": buckets[1],
+        "bond_2": buckets[2],
+        "bond_3": buckets[3],
+    }
+
+
+# ---------------------------------------------------------------------------
+# CG topology helpers
+# ---------------------------------------------------------------------------
+
+def _derive_cg_topology(
+    bond_0_pairs: list[list[int]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Derive CG topology arrays from direct CG bonds.
+
+    Args:
+        bond_0_pairs: List of [i, j] direct CG bond pairs.
+
+    Returns:
+        cg_bond_index:     (2, B) int32 array of direct bonds.
+        cg_angle_index:    (3, A) int32 array of angle triples [i, j_central, k].
+        cg_dihedral_index: (4, D) int32 array of dihedral quadruples.
+    """
+    neighbors: dict[int, list[int]] = defaultdict(list)
+    for i, j in bond_0_pairs:
+        neighbors[int(i)].append(int(j))
+        neighbors[int(j)].append(int(i))
+
+    bond_arr = (
+        np.array(bond_0_pairs, dtype=np.int32).T
+        if bond_0_pairs
+        else np.zeros((2, 0), dtype=np.int32)
+    )
+
+    # Angles: for each central j, all pairs of its neighbours
+    angles: list[list[int]] = []
+    for j in sorted(neighbors):
+        nbrs = sorted(set(neighbors[j]))
+        for a in range(len(nbrs)):
+            for b in range(a + 1, len(nbrs)):
+                angles.append([nbrs[a], j, nbrs[b]])
+    angle_arr = (
+        np.array(angles, dtype=np.int32).T if angles else np.zeros((3, 0), dtype=np.int32)
+    )
+
+    # Dihedrals: extend each bond i-j to i_ext-i-j-j_ext
+    seen: set[tuple] = set()
+    dihedrals: list[list[int]] = []
+    for i, j in bond_0_pairs:
+        for i_ext in neighbors[i]:
+            if i_ext == j:
+                continue
+            for j_ext in neighbors[j]:
+                if j_ext == i or j_ext == i_ext:
+                    continue
+                fwd = (i_ext, i, j, j_ext)
+                rev = (j_ext, j, i, i_ext)
+                if rev not in seen:
+                    seen.add(fwd)
+                    dihedrals.append(list(fwd))
+    dihedrals.sort()
+    dihedral_arr = (
+        np.array(dihedrals, dtype=np.int32).T
+        if dihedrals
+        else np.zeros((4, 0), dtype=np.int32)
+    )
+
+    return bond_arr, angle_arr, dihedral_arr
+
+
+def _tile_topology(
+    single_bonds: list[list[int]],
+    single_angles: list[list[int]],
+    single_dihedrals: list[list[int]],
+    n_sites_per_mol: int,
+    n_mols: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Tile per-molecule topology across n_mols replicas."""
+    bonds, angles, dihedrals = [], [], []
+    for m in range(n_mols):
+        off = m * n_sites_per_mol
+        bonds.extend([[i + off, j + off] for i, j in single_bonds])
+        angles.extend([[i + off, j + off, k + off] for i, j, k in single_angles])
+        dihedrals.extend([[i + off, j + off, k + off, l + off] for i, j, k, l in single_dihedrals])
+
+    def _arr(lst, ncols):
+        return np.array(lst, dtype=np.int32).T if lst else np.zeros((ncols, 0), dtype=np.int32)
+
+    return _arr(bonds, 2), _arr(angles, 3), _arr(dihedrals, 4)
+
+
+# ---------------------------------------------------------------------------
+# Hexane_Map
+# ---------------------------------------------------------------------------
 
 class Hexane_Map:
-    """Class for hexane mapping with dynamic number of molecules."""
+    """CG mapping for liquid hexane (multi-molecule system).
 
-    # Base species for a single hexane
+    Each hexane molecule (20 atoms: CH3-CH2-CH2-CH2-CH2-CH3) can be mapped
+    to 2–6 CG sites.  All CG topologies are linear chains.
+
+    Available maps: six-site, four-site, three-site, two-site,
+                    two-site-Map2, A3, A4.
+    """
+
     _base_species = [
-        "C",
-        "H",
-        "H",
-        "H",
-        "C",
-        "H",
-        "H",
-        "C",
-        "H",
-        "H",
-        "C",
-        "H",
-        "H",
-        "C",
-        "H",
-        "H",
-        "C",
-        "H",
-        "H",
-        "H",
+        "C", "H", "H", "H",   # CH3
+        "C", "H", "H",         # CH2
+        "C", "H", "H",         # CH2
+        "C", "H", "H",         # CH2
+        "C", "H", "H",         # CH2
+        "C", "H", "H", "H",   # CH3
     ]
 
-    def __init__(self, nmol=100):
-        self.mass_map = {"H": 1.01, "C": 12.011, "N": 14.007, "O": 15.999}
+    # Atomistic bonds for a single hexane (20 atoms, 0-indexed)
+    _at_bonds_single: list[tuple[int, int]] = [
+        (0, 1), (0, 2), (0, 3), (0, 4),
+        (4, 5), (4, 6), (4, 7),
+        (7, 8), (7, 9), (7, 10),
+        (10, 11), (10, 12), (10, 13),
+        (13, 14), (13, 15), (13, 16),
+        (16, 17), (16, 18), (16, 19),
+    ]
 
-        self.n_replicas = nmol
-        # Build full atom species list
-        self.map_species = self._base_species * self.n_replicas
-        # Map to atomic masses
-        self.at_masses = [self.mass_map[s] for s in self.map_species]
-        # Prepare map definitions
-        self._maps = {
-            "six-site": {
-                "indices": self._get_six_site_indices(),
-                "cg_species": np.array([2, 1, 1, 1, 1, 2] * self.n_replicas),
-            },
-            "four-site": {
-                "indices": self._get_four_site_indices(),
-                "cg_species": np.array([1, 2, 2, 1] * self.n_replicas),
-            },
-            "three-site": {
-                "indices": self._get_three_site_indices(),
-                "cg_species": np.array([1, 2, 1] * self.n_replicas),
-            },
-            "two-site": {
-                "indices": self._get_two_site_indices(),
-                "cg_species": np.array([1] * 2 * self.n_replicas),
-            },
-            "two-site-Map2": {
-                "indices": self._get_two_site_indices(),
-                "cg_species": np.array([1, 2] * self.n_replicas),
-            },
-            "A3": {
-                "indices": self._get_A3_site_indices(),
-                "cg_species": np.array([1, 2] * self.n_replicas),
-            },
-            "A4": {
-                "indices": self._get_A4_site_indices(),
-                "cg_species": np.array([1, 2, 3] * self.n_replicas),
-            },
-        }
-
-    def _get_six_site_indices(self) -> list[int]:
-        single = [
-            0,
-            -1,
-            -1,
-            -1,
-            1,
-            -1,
-            -1,
-            2,
-            -1,
-            -1,
-            3,
-            -1,
-            -1,
+    # (n_cg_per_mol, single-molecule index pattern, cg_species_single)
+    _map_specs: dict[str, tuple] = {
+        "six-site": (
+            6,
+            [0, -1, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1, 5, -1, -1, -1],
+            [2, 1, 1, 1, 1, 2],
+        ),
+        "four-site": (
             4,
-            -1,
-            -1,
-            5,
-            -1,
-            -1,
-            -1,
-        ]
-        return self._tile_indices(single, block_size=6)
-
-    def _get_four_site_indices(self) -> list[int]:
-        single = [
-            -1,
-            -1,
-            -1,
-            -1,
-            0,
-            -1,
-            -1,
-            1,
-            -1,
-            -1,
-            2,
-            -1,
-            -1,
+            [-1, -1, -1, -1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, -1, -1, -1, -1],
+            [1, 2, 2, 1],
+        ),
+        "three-site": (
             3,
-            -1,
-            -1,
-            -1,
-            -1,
-            -1,
-            -1,
-        ]
-        return self._tile_indices(single, block_size=4)
+            [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2],
+            [1, 2, 1],
+        ),
+        "two-site": (
+            2,
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1],
+        ),
+        "two-site-Map2": (
+            2,
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 2],
+        ),
+        "A3": (
+            2,
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+            [1, 2],
+        ),
+        "A4": (
+            3,
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2],
+            [1, 2, 3],
+        ),
+    }
 
-    def _get_three_site_indices(self) -> list[int]:
-        single = [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            2,
-            2,
-            2,
-            2,
-            2,
-            2,
-            2,
-        ]
-        return self._tile_indices(single, block_size=3)
+    def __init__(self, nmol: int = 100):
+        self.n_replicas = nmol
+        self.at_masses = [mass_map[s] for s in self._base_species] * nmol
 
-    def _get_two_site_indices(self) -> list[int]:
-        single = [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-        ]
-        return self._tile_indices(single, block_size=2)
+        self._maps: dict[str, dict] = {}
+        for name, (n_cg, single_idx, cg_sp) in self._map_specs.items():
+            indices = self._tile_indices(single_idx, n_cg)
+            cg_species = np.array(cg_sp * nmol, dtype=np.int32)
 
-    def _get_A3_site_indices(self) -> list[int]:
-        single = [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-        ]
-        return self._tile_indices(single, block_size=2)
+            # Linear CG chain topology, tiled across molecules
+            s_bonds = [[i, i + 1] for i in range(n_cg - 1)]
+            s_angles = [[i, i + 1, i + 2] for i in range(n_cg - 2)]
+            s_dihedrals = [[i, i + 1, i + 2, i + 3] for i in range(n_cg - 3)]
+            cg_bonds, cg_angles, cg_dihedrals = _tile_topology(
+                s_bonds, s_angles, s_dihedrals, n_cg, nmol
+            )
 
-    def _get_A4_site_indices(self) -> list[int]:
-        single = [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            1,
-            1,
-            2,
-            2,
-            2,
-            2,
-            2,
-            2,
-            2,
-        ]
-        return self._tile_indices(single, block_size=3)
+            self._maps[name] = {
+                "indices": indices,
+                "cg_species": cg_species,
+                "cg_bonds": cg_bonds,
+                "cg_angles": cg_angles,
+                "cg_dihedrals": cg_dihedrals,
+            }
 
     def _tile_indices(self, single: list[int], block_size: int) -> list[int]:
-        """
-        Tile a single-map pattern across all replicas.
-        """
         result = []
         for block in range(self.n_replicas):
             offset = block * block_size
             for v in single:
-                result.append(v if v < 0 else v + offset)
+                result.append(-1 if v < 0 else v + offset)
         return result
 
     def get_available_maps(self) -> list[str]:
-        return list(self._maps.keys())
+        return list(self._maps)
 
-    def get_map(
-        self, name: str
-    ) -> tuple[list[int], np.ndarray, jnp.ndarray, jnp.ndarray]:
+    def get_map(self, name: str) -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'. Choose one of {self.get_available_maps()}")
+        data = self._maps[name]
+        indices = data["indices"]
+        cg_species = data["cg_species"]
+        n_cg = len(cg_species)
+
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
+        )
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
+        assert jnp.allclose(jnp.sum(weights, axis=1), 1.0, atol=1e-6)
+        return indices, cg_species, cg_masses, weights
+
+    def get_cg_topology(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        d = self._maps[name]
+        return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
+
+    def get_bond_types(self, name: str) -> dict[str, list[list[int]]]:
+        """Derive CG bond types from the atomistic graph (backward compat)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        indices = self._maps[name]["indices"]
+        tiled_bonds: list[tuple[int, int]] = []
+        mol_size = 20
+        for mol in range(self.n_replicas):
+            off = mol * mol_size
+            for a, b in self._at_bonds_single:
+                tiled_bonds.append((a + off, b + off))
+        return compute_cg_bond_types(tiled_bonds, indices)
+
+
+# ---------------------------------------------------------------------------
+# BenzeneCrystal_Map
+# ---------------------------------------------------------------------------
+
+class BenzeneCrystal_Map:
+    """CG mapping for benzene crystal (multi-molecule system).
+
+    Three CG beads per benzene molecule in a triangular arrangement:
+    - bead 0: C1, C2, H1, H2
+    - bead 1: C3, C4, H3, H4
+    - bead 2: C5, C6, H5, H6
+    """
+
+    _base_species = ["C", "C", "C", "C", "C", "C", "H", "H", "H", "H", "H", "H"]
+
+    # Single benzene atomistic bonds (12 atoms, 0-indexed)
+    _at_bonds_single: list[tuple[int, int]] = [
+        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0),
+        (0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11),
+    ]
+
+    # Triangle topology for one molecule
+    _single_bonds = [[0, 1], [1, 2], [0, 2]]
+    _single_angles = [[2, 0, 1], [0, 1, 2], [0, 2, 1]]
+    _single_dihedrals: list[list[int]] = []  # no 4-site dihedrals in a triangle
+
+    def __init__(self, nmol: int = 128):
+        self.n_replicas = nmol
+        self.at_masses = [mass_map[s] for s in self._base_species] * nmol
+
+        single_indices = [0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2]
+        indices = self._tile_indices(single_indices, block_size=3)
+        cg_species = np.array([1, 1, 1] * nmol, dtype=np.int32)
+        cg_bonds, cg_angles, cg_dihedrals = _tile_topology(
+            self._single_bonds, self._single_angles, self._single_dihedrals, 3, nmol
+        )
+
+        self._maps = {
+            "three-site-adjacent": {
+                "indices": indices,
+                "cg_species": cg_species,
+                "cg_bonds": cg_bonds,
+                "cg_angles": cg_angles,
+                "cg_dihedrals": cg_dihedrals,
+            }
+        }
+
+    def _tile_indices(self, single: list[int], block_size: int) -> list[int]:
+        result: list[int] = []
+        for block in range(self.n_replicas):
+            offset = block * block_size
+            for v in single:
+                result.append(-1 if v < 0 else v + offset)
+        return result
+
+    @staticmethod
+    def _normalize_map_name(name: str) -> str:
+        if name == "three-side-adjacent":
+            return "three-site-adjacent"
+        return name
+
+    def get_available_maps(self) -> list[str]:
+        return list(self._maps) + ["three-side-adjacent"]
+
+    def get_map(self, name: str = "three-site-adjacent") -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
+        name = self._normalize_map_name(name)
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'. Choose one of {self.get_available_maps()}")
+        data = self._maps[name]
+        indices = data["indices"]
+        cg_species = data["cg_species"]
+        n_cg = len(cg_species)
+
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
+        )
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
+        return indices, cg_species, cg_masses, weights
+
+    def get_cg_topology(self, name: str = "three-site-adjacent") -> tuple:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        name = self._normalize_map_name(name)
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        d = self._maps[name]
+        return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
+
+    def get_bond_types(self, name: str = "three-site-adjacent") -> dict:
+        """Derive CG bond types from the atomistic graph (backward compat)."""
+        name = self._normalize_map_name(name)
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        indices = self._maps[name]["indices"]
+        tiled_bonds: list[tuple[int, int]] = []
+        mol_size = 12
+        for mol in range(self.n_replicas):
+            off = mol * mol_size
+            for a, b in self._at_bonds_single:
+                tiled_bonds.append((a + off, b + off))
+        return compute_cg_bond_types(tiled_bonds, indices)
+
+
+# ---------------------------------------------------------------------------
+# CappedPeptideMap
+# ---------------------------------------------------------------------------
+
+class CappedPeptideMap:
+    """CG mapping for ACE/NME-capped peptides using residue_maps.json.
+
+    Automatically builds all CG maps that are available for every residue in
+    the given sequence (intersection of per-residue available strategies).
+
+    The atomistic topology (masses, bonds) is loaded from residue_maps.json;
+    the CG topology (bonds, angles, dihedrals) is derived via
+    :func:`compute_cg_bond_types` and :func:`_derive_cg_topology`.
+
+    Args:
+        residue_sequence: Ordered list of residue names,
+            e.g. ``["ACE", "ALA", "NME"]``.
+    """
+
+    def __init__(self, residue_sequence: list[str]):
+        residue_maps = _load_residue_maps_json()
+
+        for res in residue_sequence:
+            if res not in residue_maps:
+                raise ValueError(
+                    f"Residue '{res}' not found in residue_maps.json. "
+                    f"Available: {list(residue_maps.keys())}"
+                )
+
+        self._residue_sequence = residue_sequence
+
+        # Per-residue atom counts and cumulative offsets
+        atom_offsets: list[int] = [0]
+        at_masses: list[float] = []
+        at_numbers: list[int] = []
+        for res in residue_sequence:
+            rd = residue_maps[res]
+            at_masses.extend(rd["masses"])
+            at_numbers.extend(rd["atomic_numbers"])
+            atom_offsets.append(atom_offsets[-1] + len(rd["masses"]))
+
+        self.at_masses = at_masses
+        self._at_numbers = at_numbers
+        self._n_atoms = atom_offsets[-1]
+
+        # Atomistic bonds: intra-residue + backbone inter-residue C→N
+        at_bonds: list[tuple[int, int]] = []
+        for ri, res in enumerate(residue_sequence):
+            off = atom_offsets[ri]
+            for li, lj in residue_maps[res].get("at_bonds", []):
+                at_bonds.append((off + li, off + lj))
+        for ri in range(len(residue_sequence) - 1):
+            res_k = residue_sequence[ri]
+            res_k1 = residue_sequence[ri + 1]
+            c_idx = residue_maps[res_k].get("backbone_C_idx")
+            n_idx = residue_maps[res_k1].get("backbone_N_idx")
+            if c_idx is not None and n_idx is not None:
+                at_bonds.append((atom_offsets[ri] + c_idx, atom_offsets[ri + 1] + n_idx))
+        self._at_bonds = at_bonds
+
+        # Available strategies = intersection across all residues
+        all_strategies = set.intersection(
+            *[set(residue_maps[res]["cg_maps"].keys()) for res in residue_sequence]
+        )
+
+        self._maps: dict[str, dict] = {}
+        for strategy in sorted(all_strategies):
+            indices: list[int] = []
+            cg_species: list[int] = []
+            cg_offset = 0
+
+            for ri, res in enumerate(residue_sequence):
+                rd = residue_maps[res]
+                cg_map = rd["cg_maps"][strategy]
+                local_indices = cg_map["indices"]
+                local_species = cg_map["cg_species"]
+                for local_idx in local_indices:
+                    indices.append(-1 if local_idx < 0 else int(local_idx) + cg_offset)
+                cg_species.extend(int(s) for s in local_species)
+                cg_offset += len(local_species)
+
+            # CG topology from atomistic bond graph
+            bond_types = compute_cg_bond_types(at_bonds, indices)
+            cg_bonds, cg_angles, cg_dihedrals = _derive_cg_topology(bond_types["bond_0"])
+
+            self._maps[strategy] = {
+                "indices": indices,
+                "cg_species": np.array(cg_species, dtype=np.int32),
+                "cg_bonds": cg_bonds,
+                "cg_angles": cg_angles,
+                "cg_dihedrals": cg_dihedrals,
+            }
+
+    def get_available_maps(self) -> list[str]:
+        return list(self._maps)
+
+    def get_map(self, name: str) -> tuple:
         """Return (map_indices, cg_species, cg_masses, weights)."""
         if name not in self._maps:
             raise ValueError(
-                f"Invalid map '{name}'. choose one of {self.get_available_maps()}"
+                f"Invalid map '{name}'. Choose one of {self.get_available_maps()}"
             )
         data = self._maps[name]
         indices = data["indices"]
@@ -353,3475 +663,446 @@ class Hexane_Map:
 
         indices_arr = jnp.array(indices, dtype=jnp.int32)
         at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
-        cg_masses = jax.ops.segment_sum(at_masses_arr, indices_arr, n_cg)
-
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
+        )
         weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
-
-        # Ensure weights sum to 1 per cg-site
         row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-6)
-
+        assert jnp.allclose(row_sums, 1.0, atol=1e-5), (
+            f"Weights don't sum to 1 (max err {float(jnp.max(jnp.abs(row_sums - 1))):.2e})"
+        )
         return indices, cg_species, cg_masses, weights
 
+    def get_cg_topology(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        d = self._maps[name]
+        return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
 
-class Ala2_Map:
-    """Class for Ala2 mapping. ASSUMES PEPSOL ATOM ORDERING."""
+    def get_bond_types(self, name: str) -> dict[str, list[list[int]]]:
+        """Return CG bond types dict (backward compat)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        return compute_cg_bond_types(self._at_bonds, self._maps[name]["indices"])
 
-    # Base species list
-    map_species: list[str] = [
-        "C",
-        "H",
-        "H",
-        "H",  # ACE CH3
-        "C",  # ACE C
-        "O",  # ACE O
-        "N",  # ALA N
-        "H",  # ALA H
-        "C",  # ALA CA
-        "H",  # ALA CA-H
-        "C",
-        "H",
-        "H",
-        "H",  # ALA CB
-        "C",  # ALA C
-        "O",  # ALA O
-        "N",
-        "H",  # NME NH
-        "C",
-        "H",
-        "H",
-        "H",  # NME CH3
-    ]
 
-    # Per‐map definitions
-    _maps: dict[str, dict] = {
-        "hmerged": {
-            "indices": [
-                0,
-                0,
-                0,
-                0,  # ACE CH3
-                1,
-                2,  # CO
-                3,
-                3,  # N,H
-                4,
-                4,  # CA,HA
-                5,
-                5,
-                5,
-                5,  # CB,HB1,HB2,HB3
-                6,
-                7,  # C,O
-                8,
-                8,  # NME NH
-                9,
-                9,
-                9,
-                9,  # NME CH3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 1, 2, 3, 4, 1]
-            ),  # 1=CH3, 2=C, 3=O, 4=NH, 5=CH
-        },
-        "core": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                -1,
-                -1,
-                -1,
-                -1,  # CB
-                3,
-                -1,  # C
-                4,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 2]),  # 1=C, 2=N
-        },
-        "coreSingle": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                -1,
-                -1,
-                -1,
-                -1,  # CB
-                3,
-                -1,  # C
-                4,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array([1, 1, 1, 1, 1]),  # 1=C, 2=N
-        },
-        "coreMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                -1,
-                -1,
-                -1,
-                -1,  # CB
-                3,
-                -1,  # C
-                4,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array([1, 2, 3, 4, 5]),  # 𝐶𝑂𝐶𝐻3, 𝑁𝐻, 𝐶𝐻𝐶𝐻3, 𝐶𝑂, 𝑁𝐻𝐶𝐻3
-        },
-        "heavyOnly": {  #
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # ACE CH3
-                1,
-                2,  # CO
-                3,
-                -1,  # N,H
-                4,
-                -1,  # CA,HA
-                5,
-                -1,
-                -1,
-                -1,  # CB,HB1,HB2,HB3
-                6,
-                7,  # C,O
-                8,
-                -1,  # NME NH
-                9,
-                -1,
-                -1,
-                -1,  # NME CH3
-            ],
-            "cg_species": np.array([1, 1, 2, 3, 1, 1, 1, 2, 3, 1]),  # 1=C, 2=O, 3=N
-        },
-        "heavyOnlyMap2": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # ACE CH3
-                1,
-                2,  # CO
-                3,
-                -1,  # N,H
-                4,
-                -1,  # CA,HA
-                5,
-                -1,
-                -1,
-                -1,  # CB,HB1,HB2,HB3
-                6,
-                7,  # C,O
-                8,
-                -1,  # NME NH
-                9,
-                -1,
-                -1,
-                -1,  # NME CH3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 1, 2, 3, 4, 1]
-            ),  # 1=CH3, 2=C, 3=O, 4=NH, 5=CH
-        },
-        "coreBeta": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0, # C_ACE
-                -1,  
-                1, # N_ALA
-                -1,  
-                2, # CA
-                -1,  
-                3, # CB
-                -1,
-                -1,
-                -1,  
-                4,# C_ALA
-                -1,  
-                5, # N_NME
-                -1,  
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 1, 2]),  # 1=C, 2=N
-        },
-        "coreBetaMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                3,
-                -1,
-                -1,
-                -1,  # CB
-                4,
-                -1,  # C
-                5,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array([1, 2, 3, 4, 5, 6]),
-        },
-        "coreBetaMap3": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                3,
-                -1,
-                -1,
-                -1,  # CB
-                4,
-                -1,  # C
-                5,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array([1, 2, 3, 3, 2, 1]),
-        },
-        "coreBetaMap4": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                3,
-                -1,
-                -1,
-                -1,  # CB
-                4,
-                -1,  # C
-                5,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array(
-                [1, 2, 1, 1, 1, 3]
-            ),  # 1=COCH3, 2=NH, 3=CA, 4=CO, 5=CB, 6=NHCH3
-        },
-        "coreBetaMap5": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                3,
-                -1,
-                -1,
-                -1,  # CB
-                4,
-                -1,  # C
-                5,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array(
-                [2, 1, 1, 1, 1, 2]
-            ),  # 1=COCH3, 2=NH, 3=CA, 4=CO, 5=CB, 6=NHCH3
-        },
-        "coreBetaSingle": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,
-                0,
-                -1,  # C
-                1,
-                -1,  # N
-                2,
-                -1,  # Ca
-                3,
-                -1,
-                -1,
-                -1,  # CB
-                4,
-                -1,  # C
-                5,
-                -1,  # N
-                -1,
-                -1,
-                -1,
-                -1,
-            ],
-            "cg_species": np.array(
-                [1, 1, 1, 1, 1, 1]
-            ),  # 1=COCH3, 2=NH, 3=CA, 4=CO, 5=CB, 6=NHCH3
-        },
-    }
+# ---------------------------------------------------------------------------
+# TIP3P_Water_Map
+# ---------------------------------------------------------------------------
 
-    at_masses = [mass_map[s] for s in map_species]
+class TIP3P_Water_Map:
+    """CG mapping for TIP3P water: one bead per water molecule, no bonds.
 
-    def __init__(self):
-        self.n_atoms = len(self.map_species)
+    Maps:
+    - ``"UnitedAtom"``: all three atoms (O, H, H) contribute to the bead.
+    - ``"HeavyAtom"``:  only the oxygen atom contributes.
+    """
+
+    _at_masses_single = [15.999, 1.008, 1.008]  # O, H, H
+
+    def __init__(self, n_mols: int):
+        self.n_mols = n_mols
+        self.at_masses = self._at_masses_single * n_mols
+
+        empty_bonds = np.zeros((2, 0), dtype=np.int32)
+        empty_angles = np.zeros((3, 0), dtype=np.int32)
+        empty_dihedrals = np.zeros((4, 0), dtype=np.int32)
+
+        ua_indices = []
+        ha_indices = []
+        for m in range(n_mols):
+            ua_indices.extend([m, m, m])       # O, H1, H2 → bead m
+            ha_indices.extend([m, -1, -1])     # O → bead m; H1, H2 excluded
+
+        self._maps = {
+            "UnitedAtom": {
+                "indices": ua_indices,
+                "cg_species": np.ones(n_mols, dtype=np.int32),
+                "cg_bonds": empty_bonds,
+                "cg_angles": empty_angles,
+                "cg_dihedrals": empty_dihedrals,
+            },
+            "HeavyAtom": {
+                "indices": ha_indices,
+                "cg_species": np.ones(n_mols, dtype=np.int32),
+                "cg_bonds": empty_bonds,
+                "cg_angles": empty_angles,
+                "cg_dihedrals": empty_dihedrals,
+            },
+        }
 
     def get_available_maps(self) -> list[str]:
         return list(self._maps)
 
-    def get_map(
-        self, name: str = "hmerged"
-    ) -> tuple[list[int], np.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Return (map_indices, cg_species, cg_masses, weights) for 'hmerged' or 'core'."""
+    def get_map(self, name: str) -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
         if name not in self._maps:
-            raise ValueError(
-                f"Invalid map '{name}'. choose one of {self.get_available_maps()}"
-            )
-
+            raise ValueError(f"Invalid map '{name}'. Choose one of {self.get_available_maps()}")
         data = self._maps[name]
         indices = data["indices"]
         cg_species = data["cg_species"]
         n_cg = len(cg_species)
 
-        indices_arr = jnp.array(indices, dtype=jnp.int32)  # shape (n_atoms,)
-        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)  # shape (n_atoms,)
-        cg_masses = jax.ops.segment_sum(at_masses_arr, indices_arr, n_cg)
-
-        weights = get_map_weights(
-            indices_arr,  # map
-            at_masses_arr,  # per-atom masses
-            cg_masses,  # computed via bincount or segment_sum
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
         )
-
-        row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-6)
-
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
         return indices, cg_species, cg_masses, weights
 
-
-class Ala15_Map:
-    """Class for Ala15 mapping. ASSUMES PEPSOL ATOM ORDERING."""
-
-    map_species: list[str] = [
-        "H",  # 1ACE HH31   - Hydrogen (methyl hydrogen 1)
-        "C",  # 1ACE CH3    - Carbon (methyl group in acetyl cap)
-        "H",  # 1ACE HH32   - Hydrogen (methyl hydrogen 2)
-        "H",  # 1ACE HH33   - Hydrogen (methyl hydrogen 3)
-        "C",  # 1ACE C      - Carbon (carbonyl carbon in acetyl)
-        "O",  # 1ACE O      - Oxygen (carbonyl oxygen in acetyl)
-        "N",  # 2ALA N      - Nitrogen (amino nitrogen in alanine 2)
-        "H",  # 2ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 2ALA CA     - Carbon (alpha carbon)
-        "H",  # 2ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 2ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 2ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 2ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 2ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 2ALA C      - Carbon (carbonyl carbon)
-        "O",  # 2ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 3ALA N      - Nitrogen (amino nitrogen in alanine 3)
-        "H",  # 3ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 3ALA CA     - Carbon (alpha carbon)
-        "H",  # 3ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 3ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 3ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 3ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 3ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 3ALA C      - Carbon (carbonyl carbon)
-        "O",  # 3ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 4ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 4ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 4ALA CA     - Carbon (alpha carbon)
-        "H",  # 4ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 4ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 4ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 4ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 4ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 4ALA C      - Carbon (carbonyl carbon)
-        "O",  # 4ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 5ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 5ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 5ALA CA     - Carbon (alpha carbon)
-        "H",  # 5ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 5ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 5ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 5ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 5ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 5ALA C      - Carbon (carbonyl carbon)
-        "O",  # 5ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 6ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 6ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 6ALA CA     - Carbon (alpha carbon)
-        "H",  # 6ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 6ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 6ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 6ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 6ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 6ALA C      - Carbon (carbonyl carbon)
-        "O",  # 6ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 7ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 7ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 7ALA CA     - Carbon (alpha carbon)
-        "H",  # 7ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 7ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 7ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 7ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 7ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 7ALA C      - Carbon (carbonyl carbon)
-        "O",  # 7ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 8ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 8ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 8ALA CA     - Carbon (alpha carbon)
-        "H",  # 8ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 8ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 8ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 8ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 8ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 8ALA C      - Carbon (carbonyl carbon)
-        "O",  # 8ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 9ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 9ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 9ALA CA     - Carbon (alpha carbon)
-        "H",  # 9ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 9ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 9ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 9ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 9ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 9ALA C      - Carbon (carbonyl carbon)
-        "O",  # 9ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 10ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 10ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 10ALA CA     - Carbon (alpha carbon)
-        "H",  # 10ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 10ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 10ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 10ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 10ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 10ALA C      - Carbon (carbonyl carbon)
-        "O",  # 10ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 11ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 11ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 11ALA CA     - Carbon (alpha carbon)
-        "H",  # 11ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 11ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 11ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 11ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 11ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 11ALA C      - Carbon (carbonyl carbon)
-        "O",  # 11ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 12ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 12ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 12ALA CA     - Carbon (alpha carbon)
-        "H",  # 12ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 12ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 12ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 12ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 12ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 12ALA C      - Carbon (carbonyl carbon)
-        "O",  # 12ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 13ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 13ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 13ALA CA     - Carbon (alpha carbon)
-        "H",  # 13ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 13ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 13ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 13ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 13ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 13ALA C      - Carbon (carbonyl carbon)
-        "O",  # 13ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 14ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 14ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 14ALA CA     - Carbon (alpha carbon)
-        "H",  # 14ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 14ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 14ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 14ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 14ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 14ALA C      - Carbon (carbonyl carbon)
-        "O",  # 14ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 15ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 15ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 15ALA CA     - Carbon (alpha carbon)
-        "H",  # 15ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 15ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 15ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 15ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 15ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 15ALA C      - Carbon (carbonyl carbon)
-        "O",  # 15ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 16ALA N      - Nitrogen (amino nitrogen in alanine 4)
-        "H",  # 16ALA H      - Hydrogen (amino hydrogen)
-        "C",  # 16ALA CA     - Carbon (alpha carbon)
-        "H",  # 16ALA HA     - Hydrogen (alpha hydrogen)
-        "C",  # 16ALA CB     - Carbon (beta carbon, methyl side chain)
-        "H",  # 16ALA HB1    - Hydrogen (beta hydrogen 1)
-        "H",  # 16ALA HB2    - Hydrogen (beta hydrogen 2)
-        "H",  # 16ALA HB3    - Hydrogen (beta hydrogen 3)
-        "C",  # 16ALA C      - Carbon (carbonyl carbon)
-        "O",  # 16ALA O      - Oxygen (carbonyl oxygen)
-        "N",  # 17NME N      - Nitrogen (N-methyl cap)
-        "H",  # 17NME H      - Hydrogen (amino hydrogen)
-        "C",  # 17NME CH3    - Carbon (methyl carbon in N-methyl cap)
-        "H",  # 17NME HH31   - Hydrogen (methyl hydrogen 1)
-        "H",  # 17NME HH32   - Hydrogen (methyl hydrogen 2)
-        "H",  # 17NME HH33   - Hydrogen (methyl hydrogen 3)
-    ]
-
-    # Per‐map definitions
-    _maps: dict[str, dict] = {
-        "core": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # H1, CH3, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N H
-                5,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                6,  # C
-                -1,  # O
-                7,
-                -1,  # N H
-                8,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                9,  # C
-                -1,  # O
-                10,
-                -1,  # N H
-                11,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                12,  # C
-                -1,  # O
-                13,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                15,  # C
-                -1,  # O
-                16,
-                -1,  # N H
-                17,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                18,  # C
-                -1,  # O
-                19,
-                -1,  # N H
-                20,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                21,  # C
-                -1,  # O
-                22,
-                -1,  # N H
-                23,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                24,  # C
-                -1,  # O
-                25,
-                -1,  # N H
-                26,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                27,  # C
-                -1,  # O
-                28,
-                -1,  # N H
-                29,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                30,  # C
-                -1,  # O
-                31,
-                -1,  # N H
-                32,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                33,  # C
-                -1,  # O
-                34,
-                -1,  # N H
-                35,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                36,  # C
-                -1,  # O
-                37,
-                -1,  # N H
-                38,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                39,  # C
-                -1,  # O
-                40,
-                -1,  # N H
-                41,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                42,  # C
-                -1,  # O
-                43,
-                -1,  # N H
-                44,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                45,  # C
-                -1,  # O
-                46,  # N
-                -1,  # H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    2,
-                ]
-            ),  # 1=C, 2=N
-            # Ala2: "cg_species": np.array([1,2,3,4,5]),  # 𝐶𝑂𝐶𝐻3, 𝑁𝐻, 𝐶𝐻𝐶𝐻3, 𝐶𝑂, 𝑁𝐻𝐶𝐻3
-        },
-        "coreMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N H
-                5,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                6,  # C
-                -1,  # O
-                7,
-                -1,  # N H
-                8,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                9,  # C
-                -1,  # O
-                10,
-                -1,  # N H
-                11,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                12,  # C
-                -1,  # O
-                13,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                15,  # C
-                -1,  # O
-                16,
-                -1,  # N H
-                17,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                18,  # C
-                -1,  # O
-                19,
-                -1,  # N H
-                20,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                21,  # C
-                -1,  # O
-                22,
-                -1,  # N H
-                23,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                24,  # C
-                -1,  # O
-                25,
-                -1,  # N H
-                26,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                27,  # C
-                -1,  # O
-                28,
-                -1,  # N H
-                29,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                30,  # C
-                -1,  # O
-                31,
-                -1,  # N H
-                32,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                33,  # C
-                -1,  # O
-                34,
-                -1,  # N H
-                35,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                36,  # C
-                -1,  # O
-                37,
-                -1,  # N H
-                38,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                39,  # C
-                -1,  # O
-                40,
-                -1,  # N H
-                41,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                42,  # C
-                -1,  # O
-                43,
-                -1,  # N H
-                44,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                45,  # C
-                -1,  # O
-                46,  # N
-                -1,  # H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [
-                    1,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    2,
-                    3,
-                    4,
-                    5,
-                ]
-            ),  # 𝐶𝑂𝐶𝐻3, 𝑁𝐻, 𝐶𝐻𝐶𝐻3, 𝐶𝑂, 𝑁𝐻𝐶𝐻3
-            # Ala2: "cg_species": np.array([1,2,3,4,5]),  # 𝐶𝑂𝐶𝐻3, 𝑁𝐻, 𝐶𝐻𝐶𝐻3, 𝐶𝑂, 𝑁𝐻𝐶𝐻3
-        },
-        "coreBeta": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                3,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                7,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                8,  # C
-                -1,  # O
-                9,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                11,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                12,  # C
-                -1,  # O
-                13,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                15,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                16,  # C
-                -1,  # O
-                17,
-                -1,  # N H
-                18,
-                -1,  # CA HA
-                19,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                20,  # C
-                -1,  # O
-                21,
-                -1,  # N H
-                22,
-                -1,  # CA HA
-                23,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                24,  # C
-                -1,  # O
-                25,
-                -1,  # N H
-                26,
-                -1,  # CA HA
-                27,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                28,  # C
-                -1,  # O
-                29,
-                -1,  # N H
-                30,
-                -1,  # CA HA
-                31,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                32,  # C
-                -1,  # O
-                33,
-                -1,  # N H
-                34,
-                -1,  # CA HA
-                35,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                36,  # C
-                -1,  # O
-                37,
-                -1,  # N H
-                38,
-                -1,  # CA HA
-                39,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                40,  # C
-                -1,  # O
-                41,
-                -1,  # N H
-                42,
-                -1,  # CA HA
-                43,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                44,  # C
-                -1,  # O
-                45,
-                -1,  # N H
-                46,
-                -1,  # CA HA
-                47,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                48,  # C
-                -1,  # O
-                49,
-                -1,  # N H
-                50,
-                -1,  # CA HA
-                51,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                52,  # C
-                -1,  # O
-                53,
-                -1,  # N H
-                54,
-                -1,  # CA HA
-                55,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                56,  # C
-                -1,  # O
-                57,
-                -1,  # N H
-                58,
-                -1,  # CA HA
-                59,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                60,  # C
-                -1,  # O
-                61,  # N
-                -1,  # H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                ]
-            ),  # 1=C, 2=N
-        },
-        "heavyOnlyMap2": {
-            "indices": [
-                -1,
-                0,
-                -1,
-                -1,  # H1,CH3,  H2, H3
-                1,  # C
-                2,  # O
-                3,
-                -1,  # N H
-                4,
-                -1,  # CA HA
-                5,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                6,  # C
-                7,  # O
-                8,
-                -1,  # N H
-                9,
-                -1,  # CA HA
-                10,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                11,  # C
-                12,  # O
-                13,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                15,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                16,  # C
-                17,  # O
-                18,
-                -1,  # N H
-                19,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 1]
-            ),  # 1=CH3,2=C,3=O, 4=NH, 5=CH
-            # Ala2 hmerged: "cg_species": np.array([1,2,3,4,5,2,3,1,4,1]),  # 1=CH3,2=C,3=O, 4=NH, 5=CH
-        },
-        "coreBeta": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                3,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                7,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                8,  # C
-                -1,  # O
-                9,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                11,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                12,  # C
-                -1,  # O
-                13,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                15,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                16,  # C
-                -1,  # O
-                17,
-                -1,  # N H
-                18,
-                -1,  # CA HA
-                19,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                20,  # C
-                -1,  # O
-                21,
-                -1,  # N H
-                22,
-                -1,  # CA HA
-                23,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                24,  # C
-                -1,  # O
-                25,
-                -1,  # N H
-                26,
-                -1,  # CA HA
-                27,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                28,  # C
-                -1,  # O
-                29,
-                -1,  # N H
-                30,
-                -1,  # CA HA
-                31,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                32,  # C
-                -1,  # O
-                33,
-                -1,  # N H
-                34,
-                -1,  # CA HA
-                35,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                36,  # C
-                -1,  # O
-                37,
-                -1,  # N H
-                38,
-                -1,  # CA HA
-                39,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                40,  # C
-                -1,  # O
-                41,
-                -1,  # N H
-                42,
-                -1,  # CA HA
-                43,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                44,  # C
-                -1,  # O
-                45,
-                -1,  # N H
-                46,
-                -1,  # CA HA
-                47,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                48,  # C
-                -1,  # O
-                49,
-                -1,  # N H
-                50,
-                -1,  # CA HA
-                51,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                52,  # C
-                -1,  # O
-                53,
-                -1,  # N H
-                54,
-                -1,  # CA HA
-                55,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                56,  # C
-                -1,  # O
-                57,
-                -1,  # N H
-                58,
-                -1,  # CA HA
-                59,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                60,  # C
-                -1,  # O
-                61,  # N
-                -1,  # H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                    1,
-                    1,
-                    1,
-                    2,
-                ]
-            ),  # 1=C, 2=N
-        },
-        "coreBetaMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                3,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                7,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                8,  # C
-                -1,  # O
-                9,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                11,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                12,  # C
-                -1,  # O
-                13,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                15,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                16,  # C
-                -1,  # O
-                17,
-                -1,  # N H
-                18,
-                -1,  # CA HA
-                19,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                20,  # C
-                -1,  # O
-                21,
-                -1,  # N H
-                22,
-                -1,  # CA HA
-                23,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                24,  # C
-                -1,  # O
-                25,
-                -1,  # N H
-                26,
-                -1,  # CA HA
-                27,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                28,  # C
-                -1,  # O
-                29,
-                -1,  # N H
-                30,
-                -1,  # CA HA
-                31,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                32,  # C
-                -1,  # O
-                33,
-                -1,  # N H
-                34,
-                -1,  # CA HA
-                35,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                36,  # C
-                -1,  # O
-                37,
-                -1,  # N H
-                38,
-                -1,  # CA HA
-                39,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                40,  # C
-                -1,  # O
-                41,
-                -1,  # N H
-                42,
-                -1,  # CA HA
-                43,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                44,  # C
-                -1,  # O
-                45,
-                -1,  # N H
-                46,
-                -1,  # CA HA
-                47,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                48,  # C
-                -1,  # O
-                49,
-                -1,  # N H
-                50,
-                -1,  # CA HA
-                51,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                52,  # C
-                -1,  # O
-                53,
-                -1,  # N H
-                54,
-                -1,  # CA HA
-                55,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                56,  # C
-                -1,  # O
-                57,
-                -1,  # N H
-                58,
-                -1,  # CA HA
-                59,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                60,  # C
-                -1,  # O
-                61,  # N
-                -1,  # H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [
-                    1,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    2,
-                    3,
-                    5,
-                    4,
-                    6,
-                ]
-            ),
-            # Ala2: "cg_species": np.array([1,2,3,4,5,6]),  # 1=COCH3, 2=NH, 3=CA, 4=CO, 5=CB, 6=NHCH3
-        },
-        "conway": {
-            "indices": [
-                0,
-                0,
-                0,
-                0,  # CH3, H1, H2, H3
-                0,  # C
-                0,  # O
-                1,
-                1,  # N H
-                1,
-                1,  # CA HA
-                1,
-                1,
-                1,
-                1,  # CB HB1 HB2 HB3
-                2,  # C
-                2,  # O
-                3,
-                3,  # N H
-                3,
-                3,  # CA HA
-                3,
-                3,
-                3,
-                3,  # CB HB1 HB2 HB3
-                4,  # C
-                4,  # O
-                5,
-                5,  # N H
-                5,
-                5,  # CA HA
-                5,
-                5,
-                5,
-                5,  # CB HB1 HB2 HB3
-                6,  # C
-                6,  # O
-                7,
-                7,  # N H
-                7,
-                7,  # CA HA
-                7,
-                7,
-                7,
-                7,  # CB HB1 HB2 HB3
-                8,  # C
-                8,  # O
-                9,
-                9,  # N H
-                9,
-                9,  # CA HA
-                9,
-                9,
-                9,
-                9,  # CB HB1 HB2 HB3
-                10,  # C
-                10,  # O
-                11,
-                11,  # N H
-                11,
-                11,  # CA HA
-                11,
-                11,
-                11,
-                11,  # CB HB1 HB2 HB3
-                12,  # C
-                12,  # O
-                13,
-                13,  # N H
-                13,
-                13,  # CA HA
-                13,
-                13,
-                13,
-                13,  # CB HB1 HB2 HB3
-                14,  # C
-                14,  # O
-                15,
-                15,  # N H
-                15,
-                15,  # CA HA
-                15,
-                15,
-                15,
-                15,  # CB HB1 HB2 HB3
-                16,  # C
-                16,  # O
-                17,
-                17,  # N H
-                17,
-                17,  # CA HA
-                17,
-                17,
-                17,
-                17,  # CB HB1 HB2 HB3
-                18,  # C
-                18,  # O
-                19,
-                19,  # N H
-                19,
-                19,  # CA HA
-                19,
-                19,
-                19,
-                19,  # CB HB1 HB2 HB3
-                20,  # C
-                20,  # O
-                21,
-                21,  # N H
-                21,
-                21,  # CA HA
-                21,
-                21,
-                21,
-                21,  # CB HB1 HB2 HB3
-                22,  # C
-                22,  # O
-                23,
-                23,  # N H
-                23,
-                23,  # CA HA
-                23,
-                23,
-                23,
-                23,  # CB HB1 HB2 HB3
-                24,  # C
-                24,  # O
-                25,
-                25,  # N H
-                25,
-                25,  # CA HA
-                25,
-                25,
-                25,
-                25,  # CB HB1 HB2 HB3
-                26,  # C
-                26,  # O
-                27,
-                27,  # N H
-                27,
-                27,  # CA HA
-                27,
-                27,
-                27,
-                27,  # CB HB1 HB2 HB3
-                28,  # C
-                28,  # O
-                29,
-                29,  # N H
-                29,
-                29,  # CA HA
-                29,
-                29,
-                29,
-                29,  # CB HB1 HB2 HB3
-                30,  # C
-                30,  # O
-                31,
-                31,  # N H
-                31,
-                31,
-                31,
-                31,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [
-                    1,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    2,
-                    3,
-                    4,
-                ]
-            ),  # 1=CH3CO, 2=NHCACB, 3=CO, 4=NHCH3
-        },
-        "CA": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                0,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                1,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                3,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                4,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                5,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                7,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                8,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                9,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                11,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                12,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                13,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array(
-                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
-            ),  # 1=CA
-        },
-        "CA-Map2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                0,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                1,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                3,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                4,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                5,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                7,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                8,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                9,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                11,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                12,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                13,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
-        },
-        "CA-Map3": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                0,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                1,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                3,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                4,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                5,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                7,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                8,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                9,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                11,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                12,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                13,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array([1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2, 1]),
-        },
-        "CA-Map4": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                0,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                1,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                2,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                3,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                4,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                5,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                6,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                7,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                8,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                9,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                10,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                11,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                12,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                13,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                14,
-                -1,  # CA HA
-                -1,
-                -1,
-                -1,
-                -1,  # CB HB1 HB2 HB3
-                -1,  # C
-                -1,  # O
-                -1,
-                -1,  # N H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3 HH31 HH32 HH33
-            ],
-            "cg_species": np.array([1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1]),
-        },
-    }
-
-    at_masses = [mass_map[s] for s in map_species]
-
-    def __init__(self):
-        self.n_atoms = len(self.map_species)
-
-    def get_available_maps(self) -> list[str]:
-        return list(self._maps)
-
-    def get_map(
-        self, name: str = "hmerged"
-    ) -> tuple[list[int], np.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Return (map_indices, cg_species, cg_masses, weights) for 'hmerged' or 'core'."""
+    def get_cg_topology(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return empty topology arrays (no bonds for single-bead water)."""
         if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        d = self._maps[name]
+        return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
+
+
+# ---------------------------------------------------------------------------
+# CATH protein-domain mapping
+# ---------------------------------------------------------------------------
+
+import json as _json
+import os as _os
+
+_DEFAULT_RESIDUE_MAPS = _os.path.join(
+    _os.path.dirname(__file__), "..", "..", "data", "residue_maps.json"
+)
+_DEFAULT_DOMAIN_INDEX = _os.path.join(
+    _os.path.dirname(__file__), "..", "..", "data", "domain_residue_index.json"
+)
+
+_AN_TO_SYM = {1: "H", 6: "C", 7: "N", 8: "O", 16: "S"}
+_SYM_TO_MASS = {"H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06}
+
+
+class CATH_Map:
+    """Residue-aware CG mapping for a single ACE/NME-capped CATH domain.
+
+    Reads atom→residue assignment from ``domain_residue_index.json`` and
+    per-residue CG maps from ``residue_maps.json``.
+
+    Args:
+        domain_name:        CATH domain identifier, e.g. ``"1neqA00"``.
+        cg_strategy:        Strategy key in ``residue_maps.json``
+                            (e.g. ``"CA"``, ``"coreBetaMap2"``).
+        residue_maps_path:  Optional override for ``residue_maps.json`` path.
+        domain_index_path:  Optional override for ``domain_residue_index.json`` path.
+    """
+
+    def __init__(
+        self,
+        domain_name: str,
+        cg_strategy: str = "CA",
+        residue_maps_path: str | None = None,
+        domain_index_path: str | None = None,
+    ):
+        self.domain_name = domain_name
+        self.cg_strategy = cg_strategy
+
+        residue_maps_path = residue_maps_path or _DEFAULT_RESIDUE_MAPS
+        domain_index_path = domain_index_path or _DEFAULT_DOMAIN_INDEX
+
+        with open(residue_maps_path) as f:
+            residue_maps = _json.load(f)
+        with open(domain_index_path) as f:
+            domain_index = _json.load(f)
+
+        if domain_name not in domain_index["domains"]:
+            avail = list(domain_index["domains"].keys())
             raise ValueError(
-                f"Invalid map '{name}'. choose one of {self.get_available_maps()}"
+                f"Domain '{domain_name}' not found in domain_residue_index.json. "
+                f"Available (first 5): {avail[:5]}"
             )
 
-        data = self._maps[name]
-        indices = data["indices"]
-        cg_species = data["cg_species"]
-        n_cg = len(cg_species)
+        domain_info = domain_index["domains"][domain_name]
+        residue_names = domain_info["residue_names"]
+        residue_ids = domain_info["residue_ids"]
+        self.n_atoms = domain_info["n_atoms"]
 
-        indices_arr = jnp.array(indices, dtype=jnp.int32)  # shape (n_atoms,)
-        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)  # shape (n_atoms,)
-        cg_masses = jax.ops.segment_sum(at_masses_arr, indices_arr, n_cg)
-
-        weights = get_map_weights(
-            indices_arr,  # map
-            at_masses_arr,  # per-atom masses
-            cg_masses,  # computed via bincount or segment_sum
-        )
-
-        row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-6)
-
-        return indices, cg_species, cg_masses, weights
-
-
-class Pro2_Map:
-    """Class for Ala2 mapping. ASSUMES PEPSOL ATOM ORDERING."""
-
-    map_species: list[str] = [
-        "C",  # CH3
-        "H",  # H1
-        "H",  # H2
-        "H",  # H3
-        "C",  # C
-        "O",  # O
-        "N",  # N
-        "C",  # CD
-        "H",  # HD3
-        "H",  # HD2
-        "C",  # CG
-        "H",  # HG3
-        "H",  # HG2
-        "C",  # CB
-        "H",  # HB3
-        "H",  # HB2
-        "C",  # CA
-        "H",  # HA
-        "C",  # C
-        "O",  # O
-        "N",  # N
-        "H",  # H
-        "C",  # C
-        "H",  # H1
-        "H",  # H2
-        "H",  # H3
-    ]
-
-    # Per‐map definitions
-    _maps: dict[str, dict] = {
-        "hmerged": {
-            "indices": [
-                0,
-                0,
-                0,
-                0,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,  # N
-                4,
-                4,
-                4,  # CD, HD3, HD2
-                5,
-                5,
-                5,  # CG, HG3, HG2
-                6,
-                6,
-                6,  # CB, HB3, HB2
-                7,
-                7,  # CA, HA
-                8,  # C
-                9,  # O
-                10,
-                10,  # N, H
-                11,
-                11,
-                11,
-                11,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 5, 5, 6, 2, 3, 7, 1]
-            ),  # 1=CH3, 2=C, 3=O, 4=N, 5=CH2, 6=CH, 7=NH
-        },
-        "core": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,  # N
-                -1,
-                -1,
-                -1,  # CD, HD3, HD2
-                -1,
-                -1,
-                -1,  # CG, HG3, HG2
-                -1,
-                -1,
-                -1,  # CB, HB3, HB2
-                2,
-                -1,  # CA, HA
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 2]),  # 1=C, 2=N
-        },
-        "coreMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,  # N
-                -1,
-                -1,
-                -1,  # CD, HD3, HD2
-                -1,
-                -1,
-                -1,  # CG, HG3, HG2
-                -1,
-                -1,
-                -1,  # CB, HB3, HB2
-                2,
-                -1,  # CA, HA
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array([1, 2, 3, 4, 5]),  # 𝐶𝑂𝐶𝐻3, 𝑁𝐻, CA, 𝐶𝑂, 𝑁𝐻𝐶𝐻3
-        },
-        "heavyOnly": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,  # N
-                4,
-                -1,
-                -1,  # CD, HD3, HD2
-                5,
-                -1,
-                -1,  # CG, HG3, HG2
-                6,
-                -1,
-                -1,  # CB, HB3, HB2
-                7,
-                -1,  # CA, HA
-                8,  # C
-                9,  # O
-                10,
-                -1,  # N, H
-                11,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 1, 2, 3, 1, 1, 1, 1, 1, 2, 3, 1]
-            ),  # 1=C, 2=O, 3=N
-        },
-        "heavyOnlyMap2": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,  # N
-                4,
-                -1,
-                -1,  # CD, HD3, HD2
-                5,
-                -1,
-                -1,  # CG, HG3, HG2
-                6,
-                -1,
-                -1,  # CB, HB3, HB2
-                7,
-                -1,  # CA, HA
-                8,  # C
-                9,  # O
-                10,
-                -1,  # N, H
-                11,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 5, 5, 6, 2, 3, 7, 1]
-            ),  # 1=CH3, 2=C, 3=O, 4=N, 5=CH2, 6=CH, 7=NH
-        },
-        "coreBeta": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,  # N
-                -1,
-                -1,
-                -1,  # CD, HD3, HD2
-                -1,
-                -1,
-                -1,  # CG, HG3, HG2
-                2,
-                -1,
-                -1,  # CB, HB3, HB2
-                3,
-                -1,  # CA, HA
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 1, 2]),  # 1=C, 2=N
-        },
-        "coreBetaMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,  # N
-                -1,
-                -1,
-                -1,  # CD, HD3, HD2
-                -1,
-                -1,
-                -1,  # CG, HG3, HG2
-                2,
-                -1,
-                -1,  # CB, HB3, HB2
-                3,
-                -1,  # CA, HA
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 6]
-            ),  # 1=COCH3, 2=N, 3=CB, 4=CA, 5=CO, 6=NH
-        },
-    }
-
-    at_masses = [mass_map[s] for s in map_species]
-
-    def __init__(self):
-        self.n_atoms = len(self.map_species)
-
-    def get_available_maps(self) -> list[str]:
-        return list(self._maps)
-
-    def get_map(
-        self, name: str = "hmerged"
-    ) -> tuple[list[int], np.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Return (map_indices, cg_species, cg_masses, weights) for 'hmerged' or 'core'."""
-        if name not in self._maps:
+        first_res = residue_names[0] if residue_names else ""
+        last_res = residue_names[-1] if residue_names else ""
+        if first_res != "ACE" or last_res != "NME":
             raise ValueError(
-                f"Invalid map '{name}'. choose one of {self.get_available_maps()}"
+                f"Domain '{domain_name}' is not ACE/NME-capped "
+                f"(first='{first_res}', last='{last_res}')"
             )
 
-        data = self._maps[name]
-        indices = data["indices"]
-        cg_species = data["cg_species"]
-        n_cg = len(cg_species)
+        # Group atoms by (residue_id, residue_name)
+        from collections import OrderedDict
+        residues: "OrderedDict[tuple, list[int]]" = OrderedDict()
+        for atom_idx, (res_id, res_name) in enumerate(zip(residue_ids, residue_names)):
+            residues.setdefault((res_id, res_name), []).append(atom_idx)
 
-        indices_arr = jnp.array(indices, dtype=jnp.int32)  # shape (n_atoms,)
-        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)  # shape (n_atoms,)
-        cg_masses = jax.ops.segment_sum(at_masses_arr, indices_arr, n_cg)
+        global_indices: list[int] = [-1] * self.n_atoms
+        global_cg_species: list[int] = []
+        at_masses: list[float] = []
+        cg_offset = 0
 
-        weights = get_map_weights(
-            indices_arr,  # map
-            at_masses_arr,  # per-atom masses
-            cg_masses,  # computed via bincount or segment_sum
+        for (res_id, res_name), atom_idxs in residues.items():
+            n_res_atoms = len(atom_idxs)
+            if res_name not in residue_maps:
+                print(f"  [WARN] residue '{res_name}' not in residue_maps.json – skipped")
+                at_masses.extend([12.011] * n_res_atoms)
+                continue
+
+            res_data = residue_maps[res_name]
+            cg_maps = res_data.get("cg_maps", {})
+            if cg_strategy not in cg_maps:
+                raise ValueError(
+                    f"Strategy '{cg_strategy}' not found for residue '{res_name}'. "
+                    f"Available: {list(cg_maps.keys())}"
+                )
+
+            local_indices = cg_maps[cg_strategy]["indices"]
+            local_species = cg_maps[cg_strategy]["cg_species"]
+
+            if len(local_indices) != n_res_atoms:
+                raise ValueError(
+                    f"Residue '{res_name}' (id={res_id}): expected {n_res_atoms} "
+                    f"atoms, residue_maps has {len(local_indices)}"
+                )
+
+            for local_pos, ai in enumerate(atom_idxs):
+                local_cg = local_indices[local_pos]
+                if local_cg >= 0:
+                    global_indices[ai] = cg_offset + int(local_cg)
+
+            global_cg_species.extend(int(s) for s in local_species)
+            cg_offset += len(local_species)
+
+            # Masses
+            masses = res_data.get("masses")
+            if masses and len(masses) == n_res_atoms:
+                at_masses.extend(masses)
+            else:
+                syms = res_data.get("symbols", [])
+                for s in syms[:n_res_atoms]:
+                    at_masses.append(_SYM_TO_MASS.get(str(s), 12.011))
+
+        self.at_masses = at_masses
+        self._indices = global_indices
+        self._cg_species = np.array(global_cg_species, dtype=np.int32)
+        self._n_cg = len(global_cg_species)
+
+        # Atomistic bonds
+        at_bonds: list[tuple[int, int]] = []
+        res_items = list(residues.items())
+        for (_, res_name), atom_idxs in res_items:
+            if res_name not in residue_maps:
+                continue
+            for li, lj in residue_maps[res_name].get("at_bonds", []):
+                at_bonds.append((atom_idxs[li], atom_idxs[lj]))
+
+        for k in range(len(res_items) - 1):
+            (_, rname_k), atoms_k = res_items[k]
+            (_, rname_k1), atoms_k1 = res_items[k + 1]
+            if rname_k not in residue_maps or rname_k1 not in residue_maps:
+                continue
+            c_idx = residue_maps[rname_k].get("backbone_C_idx")
+            n_idx = residue_maps[rname_k1].get("backbone_N_idx")
+            if c_idx is not None and n_idx is not None:
+                at_bonds.append((atoms_k[c_idx], atoms_k1[n_idx]))
+
+        self._at_bonds = at_bonds
+
+        # Pre-compute CG topology
+        bond_types = compute_cg_bond_types(self._at_bonds, self._indices)
+        self._cg_bonds, self._cg_angles, self._cg_dihedrals = _derive_cg_topology(
+            bond_types["bond_0"]
         )
-
-        row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-6)
-
-        return indices, cg_species, cg_masses, weights
-
-
-class Gly2_Map:
-    """Class for Ala2 mapping. ASSUMES PEPSOL ATOM ORDERING."""
-
-    map_species: list[str] = [
-        "C",  #    ACE1-CH3 CH3
-        "H",  #    ACE1-H1 H1
-        "H",  #    ACE1-H2 H2
-        "H",  #    ACE1-H3 H3
-        "C",  #    ACE1-C C
-        "O",  #    ACE1-O O
-        "N",  #    GLY2-N N
-        "H",  #    GLY2-H H
-        "C",  #    GLY2-CA CA
-        "H",  #    GLY2-HA3 HA3
-        "H",  #    GLY2-HA2 HA2
-        "C",  #   GLY2-C C
-        "O",  #   GLY2-O O
-        "N",  #   NME3-N N
-        "H",  #   NME3-H H
-        "C",  #   NME3-C C
-        "H",  #   NME3-H1 H1
-        "H",  #   NME3-H2 H2
-        "H",  #   NME3-H3 H3
-    ]
-
-    # Per‐map definitions
-    _maps: dict[str, dict] = {
-        "hmerged": {
-            "indices": [
-                0,
-                0,
-                0,
-                0,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,
-                3,  # N, H
-                4,
-                4,
-                4,  # CA, HA3, HA2
-                5,  # C
-                6,  # O
-                7,
-                7,  # N, H
-                8,
-                8,
-                8,
-                8,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 2, 3, 4, 1]
-            ),  # 1=CH3,2=C,3=O, 4=NH, 5=CH2
-        },
-        "core": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N, H
-                2,
-                -1,
-                -1,  # CA, HA3, HA2
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 2]),  # 1=C, 2=N
-        },
-        "coreMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N, H
-                2,
-                -1,
-                -1,  # CA, HA3, HA2
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5]
-            ),  # 1=COCH3, 2=N, 3=CA, 4=CO, 5=NHCH3
-        },
-        "heavyOnly": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,
-                -1,  # N, H
-                4,
-                -1,
-                -1,  # CA, HA3, HA2
-                5,  # C
-                6,  # O
-                7,
-                -1,  # N, H
-                8,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array([1, 1, 2, 3, 1, 1, 2, 3, 1]),  # 1=C, 2=O, 3=N
-        },
-        "heavyOnlyMap2": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,
-                -1,  # N, H
-                4,
-                -1,
-                -1,  # CA, HA3, HA2
-                5,  # C
-                6,  # O
-                7,
-                -1,  # N, H
-                8,
-                -1,
-                -1,
-                -1,  # C, H1, H2, H3
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 2, 3, 4, 1]
-            ),  # 1=CH3,2=C,3=O, 4=NH, 5=CH2
-        },
-    }
-
-    at_masses = [mass_map[s] for s in map_species]
-
-    def __init__(self):
-        self.n_atoms = len(self.map_species)
 
     def get_available_maps(self) -> list[str]:
-        return list(self._maps)
+        return [self.cg_strategy]
 
-    def get_map(
-        self, name: str = "hmerged"
-    ) -> tuple[list[int], np.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Return (map_indices, cg_species, cg_masses, weights) for 'hmerged' or 'core'."""
-        if name not in self._maps:
-            raise ValueError(
-                f"Invalid map '{name}'. choose one of {self.get_available_maps()}"
-            )
+    def get_map(self, name: str | None = None) -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
+        indices = self._indices
+        cg_species = self._cg_species
+        n_cg = self._n_cg
 
-        data = self._maps[name]
-        indices = data["indices"]
-        cg_species = data["cg_species"]
-        n_cg = len(cg_species)
-
-        indices_arr = jnp.array(indices, dtype=jnp.int32)  # shape (n_atoms,)
-        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)  # shape (n_atoms,)
-        cg_masses = jax.ops.segment_sum(at_masses_arr, indices_arr, n_cg)
-
-        weights = get_map_weights(
-            indices_arr,  # map
-            at_masses_arr,  # per-atom masses
-            cg_masses,  # computed via bincount or segment_sum
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
         )
-
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
         row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-6)
-
+        assert jnp.allclose(row_sums, 1.0, atol=1e-5), (
+            f"Weights don't sum to 1 (max err {float(jnp.max(jnp.abs(row_sums - 1))):.2e})"
+        )
         return indices, cg_species, cg_masses, weights
 
+    def get_cg_topology(self, name: str | None = None) -> tuple:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        return self._cg_bonds, self._cg_angles, self._cg_dihedrals
 
-class Thr2_Map:
-    """Class for Ala2 mapping. ASSUMES PEPSOL ATOM ORDERING."""
+    def get_bond_types(self, name: str | None = None) -> dict:
+        """Return CG bond types dict (backward compat)."""
+        return compute_cg_bond_types(self._at_bonds, self._indices, max_sep=4)
 
-    map_species: list[str] = [
-        "C",  #    1ACE-CH3 CH3
-        "H",  #    1ACE HH31
-        "H",  #    1ACE HH32
-        "H",  #    1ACE HH33
-        "C",  #    1ACE-C C
-        "O",  #    1ACE-O O
-        "N",  #    2THR-N N
-        "H",  #    2THR-H H
-        "C",  #    2THR-CA CA
-        "H",  #    2THR-HA HA
-        "C",  #    2THR-CB CB
-        "H",  #    2THR-HB HB
-        "C",  #    2THR-CG2 CG2
-        "H",  #    2THR-HG21 HG21
-        "H",  #    2THR-HG22 HG22
-        "H",  #    2THR-HG23 HG23
-        "C",  #    2THR-OG1 OG1
-        "H",  #    2THR-HG1 HG1
-        "C",  #    2THR-C C
-        "O",  #    2THR-O O
-        "N",  #    3NME-N N
-        "H",  #    3NME-H H
-        "C",  #    3NME-CH3 CH3
-        "H",  #    3NME HH31
-        "H",  #    3NME HH32
-        "H",  #    3NME HH33
-    ]
 
-    # Per‐map definitions
-    _maps: dict[str, dict] = {
-        "hmerged": {
-            "indices": [
-                0,
-                0,
-                0,
-                0,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,
-                3,  # N, H
-                4,
-                4,  # CA, HA
-                5,
-                5,  # CB, HB
-                6,
-                6,
-                6,
-                6,  # CG2, HG21, HG22, HG23
-                7,
-                7,  # OG1, HG1
-                8,  # C
-                9,  # O
-                10,
-                10,  # N, H
-                11,
-                11,
-                11,
-                11,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 5, 1, 6, 2, 3, 4, 1]
-            ),  # 1=CH3,2=C,3=O, 4=NH, 5=CH2, 6=OH
-        },
-        "core": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N, H
-                2,
-                -1,  # CA, HA
-                -1,
-                -1,  # CB, HB
-                -1,
-                -1,
-                -1,
-                -1,  # CG2, HG21, HG22, HG23
-                -1,
-                -1,  # OG1, HG1
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 2]),  # 1=C, 2=N
-        },
-        "coreMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N, H
-                2,
-                -1,  # CA, HA
-                -1,
-                -1,  # CB, HB
-                -1,
-                -1,
-                -1,
-                -1,  # CG2, HG21, HG22, HG23
-                -1,
-                -1,  # OG1, HG1
-                3,  # C
-                -1,  # O
-                4,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5]
-            ),  # 1=COCH3, 2=N, 3=CA, 4=CO, 5=NHCH3
-        },
-        "heavyOnly": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,
-                -1,  # N, H
-                4,
-                -1,  # CA, HA
-                5,
-                -1,  # CB, HB
-                6,
-                -1,
-                -1,
-                -1,  # CG2, HG21, HG22, HG23
-                7,
-                -1,  # OG1, HG1
-                8,  # C
-                9,  # O
-                10,
-                -1,  # N, H
-                11,
-                -1,
-                -1,
-                -1,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array(
-                [1, 1, 2, 3, 1, 1, 1, 2, 1, 2, 3, 1]
-            ),  # 1=CH3,2=C,3=O, 4=NH, 5=CH2, 6=OH
-        },
-        "heavyOnlyMap2": {
-            "indices": [
-                0,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                1,  # C
-                2,  # O
-                3,
-                -1,  # N, H
-                4,
-                -1,  # CA, HA
-                5,
-                -1,  # CB, HB
-                6,
-                -1,
-                -1,
-                -1,  # CG2, HG21, HG22, HG23
-                7,
-                -1,  # OG1, HG1
-                8,  # C
-                9,  # O
-                10,
-                -1,  # N, H
-                11,
-                -1,
-                -1,
-                -1,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 5, 1, 6, 2, 3, 4, 1]
-            ),  # 1=CH3,2=C,3=O, 4=NH, 5=CH2, 6=OH
-        },
-        "coreBeta": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N, H
-                2,
-                -1,  # CA, HA
-                3,
-                -1,  # CB, HB
-                -1,
-                -1,
-                -1,
-                -1,  # CG2, HG21, HG22, HG23
-                -1,
-                -1,  # OG1, HG1
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array([1, 2, 1, 1, 1, 2]),
-        },
-        "coreBetaMap2": {
-            "indices": [
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, H1, H2, H3
-                0,  # C
-                -1,  # O
-                1,
-                -1,  # N, H
-                2,
-                -1,  # CA, HA
-                3,
-                -1,  # CB, HB
-                -1,
-                -1,
-                -1,
-                -1,  # CG2, HG21, HG22, HG23
-                -1,
-                -1,  # OG1, HG1
-                4,  # C
-                -1,  # O
-                5,
-                -1,  # N, H
-                -1,
-                -1,
-                -1,
-                -1,  # CH3, HH31, HH32, HH33
-            ],
-            "cg_species": np.array(
-                [1, 2, 3, 4, 5, 6]
-            ),  # 1=COCH3, 2=N, 3=CA, 4=CB, 5=CO, 6=OH
-        },
-    }
+# ---------------------------------------------------------------------------
+# UncappedProteinMap  (for STATIC_FRAME datasets)
+# ---------------------------------------------------------------------------
 
-    at_masses = [mass_map[s] for s in map_species]
+class UncappedProteinMap:
+    """CG mapping for proteins loaded via MDAnalysis (e.g. STATIC_FRAME datasets).
 
-    def __init__(self):
-        self.n_atoms = len(self.map_species)
+    Unlike :class:`CATH_Map`, this class:
+    - Accepts per-atom residue metadata directly (from MDAnalysis).
+    - Does not require ACE/NME caps.
+    - Gracefully skips residues absent from ``residue_maps.json`` or whose
+      atom count mismatches the reference (warning is printed).
+
+    Args:
+        residue_ids:    (n_atoms,) per-atom residue IDs (1-based int array).
+        residue_names:  (n_atoms,) per-atom residue name strings.
+        atom_names:     (n_atoms,) per-atom GRO/PDB atom name strings.
+        cg_strategy:    Strategy key in residue_maps.json (default ``"coreBetaMap2"``).
+        residue_maps_path: Optional override path.
+    """
+
+    def __init__(
+        self,
+        residue_ids: np.ndarray,
+        residue_names: np.ndarray,
+        atom_names: np.ndarray,
+        cg_strategy: str = "coreBetaMap2",
+        residue_maps_path: str | None = None,
+    ):
+        self.cg_strategy = cg_strategy
+        n_atoms = len(residue_ids)
+
+        rmap_path = residue_maps_path or _DEFAULT_RESIDUE_MAPS
+        with open(rmap_path) as f:
+            residue_maps = _json.load(f)
+
+        # Group atoms by (residue_id, residue_name), preserving insertion order
+        from collections import OrderedDict
+        residues: "OrderedDict[tuple, list[int]]" = OrderedDict()
+        for ai, (res_id, res_name) in enumerate(zip(residue_ids, residue_names)):
+            key = (int(res_id), str(res_name))
+            residues.setdefault(key, []).append(ai)
+
+        global_indices: list[int] = [-1] * n_atoms
+        global_cg_species: list[int] = []
+        at_masses: list[float] = []
+        cg_offset = 0
+
+        for (res_id, res_name), atom_idxs in residues.items():
+            n_res = len(atom_idxs)
+            if res_name not in residue_maps:
+                print(f"  [WARN] residue '{res_name}' not in residue_maps.json – skipped")
+                at_masses.extend([12.011] * n_res)
+                continue
+
+            res_data = residue_maps[res_name]
+            cg_maps = res_data.get("cg_maps", {})
+            if cg_strategy not in cg_maps:
+                print(
+                    f"  [WARN] strategy '{cg_strategy}' missing for '{res_name}' – skipped"
+                )
+                masses = res_data.get("masses", [12.011] * n_res)
+                at_masses.extend(masses[:n_res])
+                continue
+
+            local_indices = cg_maps[cg_strategy]["indices"]
+            local_species = cg_maps[cg_strategy]["cg_species"]
+
+            if len(local_indices) != n_res:
+                print(
+                    f"  [WARN] residue '{res_name}' (id={res_id}): atom count mismatch "
+                    f"({n_res} in structure, {len(local_indices)} in residue_maps) – skipped"
+                )
+                masses = res_data.get("masses", [12.011] * n_res)
+                at_masses.extend(masses[:n_res])
+                continue
+
+            for local_pos, ai in enumerate(atom_idxs):
+                local_cg = local_indices[local_pos]
+                if local_cg >= 0:
+                    global_indices[ai] = cg_offset + int(local_cg)
+
+            global_cg_species.extend(int(s) for s in local_species)
+            cg_offset += len(local_species)
+
+            masses = res_data.get("masses")
+            if masses and len(masses) == n_res:
+                at_masses.extend(masses)
+            else:
+                syms = res_data.get("symbols", [])
+                at_masses.extend(_SYM_TO_MASS.get(str(s), 12.011) for s in syms[:n_res])
+
+        self.at_masses = at_masses
+        self._indices = global_indices
+        self._cg_species = np.array(global_cg_species, dtype=np.int32)
+        self._n_cg = len(global_cg_species)
+
+        # Atomistic bonds
+        at_bonds: list[tuple[int, int]] = []
+        res_items = list(residues.items())
+        for (_, res_name), atom_idxs in res_items:
+            if res_name not in residue_maps:
+                continue
+            for li, lj in residue_maps[res_name].get("at_bonds", []):
+                if li < len(atom_idxs) and lj < len(atom_idxs):
+                    at_bonds.append((atom_idxs[li], atom_idxs[lj]))
+
+        for k in range(len(res_items) - 1):
+            (_, rname_k), atoms_k = res_items[k]
+            (_, rname_k1), atoms_k1 = res_items[k + 1]
+            if rname_k not in residue_maps or rname_k1 not in residue_maps:
+                continue
+            c_idx = residue_maps[rname_k].get("backbone_C_idx")
+            n_idx = residue_maps[rname_k1].get("backbone_N_idx")
+            if c_idx is not None and n_idx is not None:
+                if c_idx < len(atoms_k) and n_idx < len(atoms_k1):
+                    at_bonds.append((atoms_k[c_idx], atoms_k1[n_idx]))
+
+        self._at_bonds = at_bonds
+
+        # Pre-compute CG topology
+        bond_types = compute_cg_bond_types(self._at_bonds, self._indices)
+        self._cg_bonds, self._cg_angles, self._cg_dihedrals = _derive_cg_topology(
+            bond_types["bond_0"]
+        )
 
     def get_available_maps(self) -> list[str]:
-        return list(self._maps)
+        return [self.cg_strategy]
 
-    def get_map(
-        self, name: str = "hmerged"
-    ) -> tuple[list[int], np.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Return (map_indices, cg_species, cg_masses, weights) for 'hmerged' or 'core'."""
-        if name not in self._maps:
-            raise ValueError(
-                f"Invalid map '{name}'. choose one of {self.get_available_maps()}"
-            )
+    def get_map(self, name: str | None = None) -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
+        indices = self._indices
+        cg_species = self._cg_species
+        n_cg = self._n_cg
 
-        data = self._maps[name]
-        indices = data["indices"]
-        cg_species = data["cg_species"]
-        n_cg = len(cg_species)
-
-        indices_arr = jnp.array(indices, dtype=jnp.int32)  # shape (n_atoms,)
-        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)  # shape (n_atoms,)
-        cg_masses = jax.ops.segment_sum(at_masses_arr, indices_arr, n_cg)
-
-        weights = get_map_weights(
-            indices_arr,  # map
-            at_masses_arr,  # per-atom masses
-            cg_masses,  # computed via bincount or segment_sum
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
         )
-
-        row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-6)
-
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
         return indices, cg_species, cg_masses, weights
+
+    def get_cg_topology(self, name: str | None = None) -> tuple:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        return self._cg_bonds, self._cg_angles, self._cg_dihedrals
+
+    def get_bond_types(self, name: str | None = None) -> dict:
+        """Return CG bond types dict (backward compat)."""
+        return compute_cg_bond_types(self._at_bonds, self._indices, max_sep=4)
+
+
+# Alias for backward compatibility with _ProSolUncappedProteinDataset
+UncappedCATHLike_Map = UncappedProteinMap
