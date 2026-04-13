@@ -66,53 +66,6 @@ def overlay_chains(
     ax.legend()
 
 
-def plot_time_series(
-    traj_coords: np.ndarray,
-    ref_coords: np.ndarray,
-    indices: list[int],
-    outpath: str,
-    name: str,
-    line_locations: list[int],
-) -> None:
-    """
-    Plot Cartesian coordinates over time for selected atoms.
-
-    Creates a two-panel figure showing reference and simulation trajectories
-    for specified atom indices, with x/y/z as separate line styles.
-
-    Parameters
-    ----------
-    traj_coords : np.ndarray
-        Simulation coordinates, shape (n_frames, n_atoms, 3).
-    ref_coords : np.ndarray
-        Reference coordinates, same shape.
-    indices : list[int]
-        Atom indices to visualize.
-    outpath : str
-        Directory to save output images.
-    name : str
-        Label used for simulation plots.
-    line_locations : list[int]
-        Frame indices indicating chain breaks.
-    """
-    print("Plotting atom coordinate time series..")
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    for ax, data, title in zip(axes, [ref_coords, traj_coords], ["Reference", name]):
-        for idx in indices:
-            coord = data[:, idx]
-            ax.plot(coord[:, 0], label=f"Atom {idx} x")
-            ax.plot(coord[:, 1], linestyle="--", label=f"Atom {idx} y")
-            ax.plot(coord[:, 2], linestyle=":", label=f"Atom {idx} z")
-        ax.set_title(f"{title} Atom Coordinates (indices {indices})")
-        ax.set_ylabel("Coordinate")
-        ax.legend(loc="upper right")
-        if title == name:
-            add_chain_lines(ax, line_locations)
-            ax.set_xlabel("Time step")
-    plt.tight_layout()
-    fname = f"Atom_coords_{'_'.join(map(str, indices))}.png"
-    fig.savefig(os.path.join(outpath, fname), dpi=300)
-    plt.close(fig)
 
 
 def plot_dist_series(
