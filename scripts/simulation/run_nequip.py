@@ -2,8 +2,6 @@ import argparse
 import os
 import sys
 
-# Add parent directory to path to import cgbench
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")
@@ -29,14 +27,14 @@ import time
 
 from chemtrain.data import preprocessing
 from chemtrain import quantity, util
-from chemtrain.compose import mace_jax as mace_jax_compose
-from mace_jax.modules.wrapper_ops import CuEquivarianceConfig
+from external.models import allegro, nequip
+from external.models import mace
 from jax import random
 from chemtrain.ensemble import sampling
-from jax_md import partition, space, simulate, energy
+from jax_md import partition, space, simulate
 from jax_md_mod import custom_quantity
 from cgbench.core import dataset
-from cgbench.core.config import DEFAULT_SIM_CONFIG as SIM_CONFIG, BOND_SPRING_CONSTANTS
+from cgbench.core.config import DEFAULT_SIM_CONFIG as SIM_CONFIG
 
 # -------------------------
 # Configuration handling
@@ -44,14 +42,14 @@ from cgbench.core.config import DEFAULT_SIM_CONFIG as SIM_CONFIG, BOND_SPRING_CO
 model_path = args.model
 base_dir = os.path.dirname(model_path)
 
-# Load MACE config
-mace_config_path = os.path.join(base_dir, "config.json")
-if os.path.exists(mace_config_path):
-    with open(mace_config_path, "r") as f:
+# Load NEQUIP config
+NEQUIP_CONFIG_path = os.path.join(base_dir, "config.json")
+if os.path.exists(NEQUIP_CONFIG_path):
+    with open(NEQUIP_CONFIG_path, "r") as f:
         # load
-        MACE_CONFIG = json.load(f)
+        NEQUIP_CONFIG = json.load(f)
 else:
-    raise FileNotFoundError(f"Config file {mace_config_path} not found.")
+    raise FileNotFoundError(f"Config file {NEQUIP_CONFIG_path} not found.")
 
 # Load training config
 train_config_path = os.path.join(base_dir, "train_config.json")
@@ -61,69 +59,71 @@ if os.path.exists(train_config_path):
 else:
     raise FileNotFoundError(f"Train config file {train_config_path} not found.")
 
+
 config = SIM_CONFIG.copy()
 config["sim_mol"] = args.mol
-config["type"] = MACE_CONFIG["type"]
-config["cg_map"] = MACE_CONFIG.get("CG_map", None)
+config["type"] = NEQUIP_CONFIG["type"]
+config["cg_map"] = NEQUIP_CONFIG.get("CG_map", None)
 
 if args.verbose:
     print("-" * 50)
-    for key, value in MACE_CONFIG.items():
-        print(f"Found MACE config: {key}: {value}")
+    for key, value in NEQUIP_CONFIG.items():
+        print(f"Found NEQUIP config: {key}: {value}")
     print("-" * 50)
     for key, value in config.items():
         print(f"Using Sim config: {key}: {value}")
     print("-" * 50)
 
+
 # -------------------------
 # Load dataset
 # -------------------------
-if MACE_CONFIG["mol"] == "ala2":
+if NEQUIP_CONFIG["mol"] == "ala2":
     data = dataset.Ala2_Dataset(
-        train_ratio=MACE_CONFIG["train_ratio"],
-        val_ratio=MACE_CONFIG["val_ratio"],
+        train_ratio=NEQUIP_CONFIG["train_ratio"],
+        val_ratio=NEQUIP_CONFIG["val_ratio"],
     )
-    MACE_CONFIG["nmol"] = 1
-elif MACE_CONFIG["mol"] == "hexane":
+    NEQUIP_CONFIG["nmol"] = 1
+elif NEQUIP_CONFIG["mol"] == "hexane":
     data = dataset.Hexane_Dataset(
-        train_ratio=MACE_CONFIG["train_ratio"],
-        val_ratio=MACE_CONFIG["val_ratio"],
+        train_ratio=NEQUIP_CONFIG["train_ratio"],
+        val_ratio=NEQUIP_CONFIG["val_ratio"],
     )
-    MACE_CONFIG["nmol"] = 100
-elif MACE_CONFIG["mol"] == "ala15":
+    NEQUIP_CONFIG["nmol"] = 100
+elif NEQUIP_CONFIG["mol"] == "ala15":
     data = dataset.Ala15_Dataset(
-        train_ratio=MACE_CONFIG["train_ratio"], val_ratio=MACE_CONFIG["val_ratio"]
+        train_ratio=NEQUIP_CONFIG["train_ratio"], val_ratio=NEQUIP_CONFIG["val_ratio"]
     )
-    MACE_CONFIG["nmol"] = 1
-elif MACE_CONFIG["mol"] == "pro2":
+    NEQUIP_CONFIG["nmol"] = 1
+elif NEQUIP_CONFIG["mol"] == "pro2":
     data = dataset.Pro2_Dataset(
-        train_ratio=MACE_CONFIG["train_ratio"], val_ratio=MACE_CONFIG["val_ratio"]
+        train_ratio=NEQUIP_CONFIG["train_ratio"], val_ratio=NEQUIP_CONFIG["val_ratio"]
     )
-    MACE_CONFIG["nmol"] = 1
-elif MACE_CONFIG["mol"] == "thr2":
+    NEQUIP_CONFIG["nmol"] = 1
+elif NEQUIP_CONFIG["mol"] == "thr2":
     data = dataset.Thr2_Dataset(
-        train_ratio=MACE_CONFIG["train_ratio"], val_ratio=MACE_CONFIG["val_ratio"]
+        train_ratio=NEQUIP_CONFIG["train_ratio"], val_ratio=NEQUIP_CONFIG["val_ratio"]
     )
-    MACE_CONFIG["nmol"] = 1
-elif MACE_CONFIG["mol"] == "gly2":
+    NEQUIP_CONFIG["nmol"] = 1
+elif NEQUIP_CONFIG["mol"] == "gly2":
     data = dataset.Gly2_Dataset(
-        train_ratio=MACE_CONFIG["train_ratio"], val_ratio=MACE_CONFIG["val_ratio"]
+        train_ratio=NEQUIP_CONFIG["train_ratio"], val_ratio=NEQUIP_CONFIG["val_ratio"]
     )
-    MACE_CONFIG["nmol"] = 1
+    NEQUIP_CONFIG["nmol"] = 1
 else:
     raise ValueError(
         "Invalid molecule. Use 'ala2', 'ala15', 'hexane', 'pro2', 'thr2', or 'gly2'."
     )
 
 # AT
-if MACE_CONFIG["type"] == "AT":
+if NEQUIP_CONFIG["type"] == "AT":
     dataset = data.dataset_U
     species = data.species
     masses = data.masses
     n_species = data.n_species
 # CG
-elif MACE_CONFIG["type"] == "CG":
-    data.coarse_grain(map=MACE_CONFIG["CG_map"])
+elif NEQUIP_CONFIG["type"] == "CG":
+    data.coarse_grain(map=NEQUIP_CONFIG["CG_map"])
     dataset = data.cg_dataset_U
     species = data.cg_species
     masses = data.cg_masses
@@ -134,7 +134,7 @@ else:
 # -------------------------
 # Neighbor list setup
 # -------------------------
-r_cutoff = MACE_CONFIG["r_cutoff"]
+r_cutoff = NEQUIP_CONFIG["r_cutoff"]
 box = data.box
 
 displacement_fn, _ = space.periodic_general(box=box, fractional_coordinates=True)
@@ -144,7 +144,7 @@ nbrs_init, (max_neighbors, max_edges, avg_num_neighbors) = (
         dataset["training"],
         displacement_fn,
         box,
-        r_cutoff=MACE_CONFIG["r_cutoff"],
+        r_cutoff=NEQUIP_CONFIG["r_cutoff"],
         mask_key="mask",
         box_key="box",
         format=partition.Sparse,
@@ -156,107 +156,28 @@ nbrs_init, (max_neighbors, max_edges, avg_num_neighbors) = (
 # -------------------------
 # Model initialization
 # -------------------------
-mace_cfg = {
-    "r_cutoff": MACE_CONFIG["r_cutoff"],
-    "hidden_irreps": MACE_CONFIG["hidden_irreps"],
-    "MLP_irreps": MACE_CONFIG["readout_mlp_irreps"],
-    "num_interactions": MACE_CONFIG["num_interactions"],
-    "max_ell": MACE_CONFIG["max_ell"],
-    "correlation": MACE_CONFIG["correlation"],
-    "n_radial_basis": MACE_CONFIG["n_radial_basis"],
-    "output_irreps": MACE_CONFIG["output_irreps"],
-    "use_so3": MACE_CONFIG.get("use_so3", False),
-}
-
-cueq_config = CuEquivarianceConfig(
-    enabled=True,
-    layout=("mul_ir"),
-    group=("O3"),
-    optimize_all=True,
-    conv_fusion=True,
-)
-if MACE_CONFIG.get("use_so3", False):
-    print("[NOTE] Using SO(3) equivariance (no CuEquivariance support)")
-    cueq_config = None
-
-template_vars, gnn_energy_fn, model_config = mace_jax_compose.mace_jax_neighborlist(
-    displacement=displacement_fn,
-    r_cutoff=MACE_CONFIG["r_cutoff"],
-    n_species=n_species,
+init_fn, gnn_energy_fn = nequip.nequip_neighborlist_pp(
+    displacement_fn,
+    NEQUIP_CONFIG["r_cutoff"],
+    n_species,
+    max_edges=max_edges,
     per_particle=False,
     avg_num_neighbors=avg_num_neighbors,
     mode="energy",
-    use_custom_batch_fn=False,
-    mace_config=mace_cfg,
-    cueq_config=cueq_config,
+    positive_species=True,
 )
 
-variables = template_vars
-species_init = jnp.asarray(species)
-
-if 'use_bond_priors' in MACE_CONFIG and MACE_CONFIG['use_bond_priors']:
-    print("Using bond priors in simulation energy function.")
-
-    
-key = f"mol={MACE_CONFIG['mol']}_map={MACE_CONFIG['CG_map']}"
-assert key in BOND_SPRING_CONSTANTS
-prior_constants = BOND_SPRING_CONSTANTS[key]
-
-harmonic_energy_fn = energy.simple_spring_bond(
-            displacement_fn, 
-            bond=jnp.asarray(prior_constants['indices']),
-            length=jnp.exp(prior_constants['log_b0']), # b0
-            epsilon=jnp.exp(prior_constants['log_kb']), # kb
-            alpha=2.0 # standard harmonic
-        )
-
-def prior_energy_wrapper(energy_fn_template):
-    def prior_energy(state, neighbor, energy_params, **kwargs):
-        energy_fn = energy_fn_template(energy_params)
-        harmonic_energy = energy_fn(state.position)
-        return harmonic_energy
-    return prior_energy
-
 def energy_fn_template(energy_params):
-    vars = {**variables}
-    vars["params"] = energy_params
+    def energy_fn(pos, neighbor, **dynamic_kwargs):
+        dynamic_kwargs.setdefault("species", species)
 
-    def energy_fn(pos, neighbor, mode=None, **dynamic_kwargs):
-        del mode
-        dynamic_kwargs.setdefault("species", species_init)
-        dynamic_kwargs.setdefault("box", box)
-        mask = dynamic_kwargs.pop("mask", jnp.ones(pos.shape[0], dtype=jnp.bool_))
+        if "box" not in dynamic_kwargs.keys():
+            print("Use default box")
 
-        pots = gnn_energy_fn(vars, pos, neighbor, **dynamic_kwargs)
-        if pots.ndim == 2 and pots.shape[-1] == 1:
-            pots = pots.squeeze(-1)
+        gnn_energy = gnn_energy_fn(energy_params, pos, neighbor, **dynamic_kwargs)
+        return gnn_energy
 
-        atomic_numbers = jnp.asarray(model_config["atomic_numbers"], dtype=jnp.int32)
-        atomic_energies = jnp.asarray(model_config["atomic_energies"], dtype=jnp.float32)
-        mapped_species = jnp.argmax(dynamic_kwargs["species"][:, None] == atomic_numbers[None, :], axis=-1)
-
-        pots = (pots - atomic_energies[mapped_species]) * mask
-        return jnp.sum(pots)
-    
-    if 'use_bond_priors' in MACE_CONFIG and MACE_CONFIG['use_bond_priors']:
-        # Hexane, two-site
-        harmonic_energy_fn = energy.simple_spring_bond(
-            displacement_fn, 
-            bond=jnp.asarray(prior_constants['indices']),
-            length=jnp.exp(prior_constants['log_b0']), # b0
-            epsilon=jnp.exp(prior_constants['log_kb']), # kb
-            alpha=2.0 # standard harmonic
-        )
-        
-        def total_energy_fn(pos, neighbor, **dynamic_kwargs):
-            gnn_e = energy_fn(pos, neighbor, **dynamic_kwargs)
-            harmonic_e = harmonic_energy_fn(pos)
-            return gnn_e + harmonic_e
-            
-        return total_energy_fn
-        
-    else:
-        return energy_fn
+    return energy_fn
 
 if args.verbose:
     print(f"Max neighbors: {max_neighbors}, max edges: {max_edges}")
@@ -294,7 +215,7 @@ def init_simulator(
 
     elif config["sim_mode"] == "helix": # use predefined helix indices
         indices = onp.load(
-            "/home/franz/Ala15_100_min_helix_indices.npy", allow_pickle=True
+            "Ala15/Ala15_100_min_helix_indices.npy", allow_pickle=True
         )
         combined_dataset = onp.concatenate(
             [dataset["training"]["R"], dataset["validation"]["R"]], axis=0
@@ -361,14 +282,13 @@ def init_simulator(
         t_equilib=t_eq,
         print_every=config["print_every"],
     )
-    
+
     # Setup quantities to record
     quantities = {
         "kT": custom_quantity.temperature,
         "epot": custom_quantity.energy_wrapper(lambda _: energy_fn),
         "force": custom_quantity.force_wrapper(lambda _: energy_fn),
         "etot": custom_quantity.total_energy_wrapper(lambda _: energy_fn),
-        "eprior": prior_energy_wrapper(lambda _: harmonic_energy_fn),
     }
 
     # Initialize trajectory generator
@@ -397,7 +317,7 @@ def visualise(traj_path, dataset):
 
     if config['sim_mol'] in vis_fn_map:
         vis_fn = vis_fn_map[config['sim_mol']]
-        vis_fn(traj_path,config,type=MACE_CONFIG['type'],dataset=dataset, cg_map=MACE_CONFIG['CG_map'])
+        vis_fn(traj_path,config,type=NEQUIP_CONFIG['type'],dataset=dataset, cg_map=NEQUIP_CONFIG['CG_map'])
     else:
         raise ValueError("Invalid molecule. Use 'ala2', 'hexane', 'ala15', 'pro2', 'thr2', or 'gly2'.")
 
@@ -410,7 +330,7 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
     config["dt"] = dt_ps
 
     print(f"\nStarting simulation for dt = {dt_fs} fs ({dt_ps} ps)...")
-    folder_name = f"traj_mol={config['sim_mol']}_dt={dt_fs}_teq={config['t_eq']}_t={config['t_total']}_nmol={MACE_CONFIG['nmol']}_nchains={config['n_chains']}_mode={config['sim_mode']}_seed={config['PRNGKey_seed']}/"
+    folder_name = f"traj_mol={config['sim_mol']}_dt={dt_fs}_teq={config['t_eq']}_t={config['t_total']}_nmol={NEQUIP_CONFIG['nmol']}_nchains={config['n_chains']}_mode={config['sim_mode']}_seed={config['PRNGKey_seed']}/"
     save_dir = os.path.join(outdir, folder_name)
 
     # Skip simulation if folder already exists
@@ -444,7 +364,7 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
     
     # calculate ns/day
     total_sim_time_ps = config["t_total"] * config["n_chains"]
-    ns_per_day = (total_sim_time_ps / elapsed_time) * (86400 / 1000)
+    ns_per_day = (total_sim_time_ps / elapsed_time) * (86400 / 1000) # convert to ns/d
     print(f"Performance: {ns_per_day:.2f} ns/day")
 
     # Save trajectory

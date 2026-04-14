@@ -12,12 +12,13 @@ MD_DATASET_PATHS = {
     "benzene_crystal_288": {
         "path": f"{BASE_DATASET_PATH}/benzene_crystal_288/benzene_crystal_288.npz",
         "config": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_elong_nvt_1.gro",
+        "topology": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_prod_1fs.tpr",
         "traj": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_prod_1fs.trr", # if no xtc is given, we assume the trr contains both coordinates and forces, and use it for traj as well
     },
     "capped_ala": { # also referred to as alanine dipeptide
         "path": f"{BASE_DATASET_PATH}/Capped_L-Ala/l-ala2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.trr",
         "selection": "not resname SOL WAT HOH",
@@ -25,7 +26,7 @@ MD_DATASET_PATHS = {
     "capped_ala2": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Ala/l-ala2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Ala/md.trr",
         "selection": "not resname SOL WAT HOH",
@@ -33,7 +34,7 @@ MD_DATASET_PATHS = {
     "capped_ala3": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Ala2/L-ala3_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Ala2/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala2/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala2/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Ala2/md.trr",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Ala2/md.trr",
         "selection": "not resname SOL WAT HOH",
@@ -41,7 +42,7 @@ MD_DATASET_PATHS = {
     "capped_pro": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Pro/l-pro2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Pro/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Pro/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Pro/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Pro/md.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Pro/md.trr",
         "selection": "not resname SOL WAT HOH",
@@ -49,7 +50,7 @@ MD_DATASET_PATHS = {
     "capped_thr": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Thr/l-thr2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Thr/md_0_1.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Thr/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Thr/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Thr/md_0_1.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Thr/md_0_1.trr",
         "selection": "not resname SOL WAT HOH",
@@ -57,7 +58,7 @@ MD_DATASET_PATHS = {
     "capped_gly": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Gly/l-gly2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Gly/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Gly/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Gly/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Gly/md.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Gly/md.trr",
         "selection": "not resname SOL WAT HOH",
@@ -65,7 +66,7 @@ MD_DATASET_PATHS = {
     "capped_ala15": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Ala15/l-ala15_ttot=500ns_dt=0.5fs.npz",
         "config": f"{BASE_DATASET_PATH}/Capped_L-Ala15/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala15/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/Capped_L-Ala15/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/Capped_L-Ala15/md.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Ala15/md.trr",
         "selection": "not resname SOL WAT HOH",
@@ -73,14 +74,14 @@ MD_DATASET_PATHS = {
     "tip3p-water": {
         "path": f"{BASE_DATASET_PATH}/TIP3P-water/tip3p-water_ttot=500ns_dt=0.5fs_nstxout=2000_stride=1_nframes=500001_nmol=901.npz",
         "config": f"{BASE_DATASET_PATH}/TIP3P-water/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/TIP3P-water/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/TIP3P-water/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/TIP3P-water/md.xtc",
         "traj_forces": f"{BASE_DATASET_PATH}/TIP3P-water/md.trr",
     },   
     "CATH": {
         "path": f"{BASE_DATASET_PATH}/CATH/",
         "config_pattern": f"{BASE_DATASET_PATH}/CATH/*/md.gro", 
-        "topology_pattern": f"{BASE_DATASET_PATH}/CATH/*topol.top",
+        "topology_pattern": f"{BASE_DATASET_PATH}/CATH/*md.tpr",
         "npz_pattern": f"{BASE_DATASET_PATH}/CATH/*/dataset.npz",
         "domains": ['1b43A02','1bl0A02','1d3yA01','1iz6A02','1mpgA03','1neqA00','1on2A01','1r3fA02','1s6lA01','1skyB01','1sxjE02','1wfxA01','1xovA03','1z1vA00','2au3A04','2bh1X00','2ckkA01','2dl0A01','2e8oA01','2f48A03','2ga1A02','2hbpA00','2heoA00','2htjA01','2hyvA01','2nttA02','2v0cA03','2wg5F02','3a5zD02','3ethA03','3g7lA00','3luyA02','3ossC00','3tj8A02','3udcA02','3vseA01','4a53A01','4hwiB01','4kdiD00','4npsA02','4o96A01']
     },
@@ -100,28 +101,28 @@ MD_DATASET_PATHS = {
 STATIC_FRAME_DATASET_PATHS = {
     "1UBQ": {
         "config": f"{BASE_DATASET_PATH}/StaticFrame/1ubq/coords.gro",
-        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1ubq/topol.top",
-        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1ubq/md.xtc", # coords only, no forces
+        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1ubq/md.tpr",
+        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1ubq/simulation.xtc", # coords only, no forces
     },
     "1IFC": {
         "config": f"{BASE_DATASET_PATH}/StaticFrame/1ifc/coords.gro",
-        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1ifc/topol.top",
-        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1ifc/md.xtc",
+        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1ifc/md.tpr",
+        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1ifc/simulation.xtc",
     },
     "1MJC": {
         "config": f"{BASE_DATASET_PATH}/StaticFrame/1mjc/coords.gro",
-        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1mjc/topol.top",
-        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1mjc/md.xtc",
+        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1mjc/md.tpr",
+        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1mjc/simulation.xtc",
     },
     "1QX5": {
         "config": f"{BASE_DATASET_PATH}/StaticFrame/1qx5/coords.gro",
-        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1qx5/topol.top",
-        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1qx5/md.xtc",
+        "topology": f"{BASE_DATASET_PATH}/StaticFrame/1qx5/md.tpr",
+        "traj": f"{BASE_DATASET_PATH}/StaticFrame/1qx5/simulation.xtc",
     },
     "6LYT": {
         "config": f"{BASE_DATASET_PATH}/StaticFrame/6lyt/coords.gro",
-        "topology": f"{BASE_DATASET_PATH}/StaticFrame/6lyt/topol.top",
-        "traj": f"{BASE_DATASET_PATH}/StaticFrame/6lyt/md.xtc",
+        "topology": f"{BASE_DATASET_PATH}/StaticFrame/6lyt/md.tpr",
+        "traj": f"{BASE_DATASET_PATH}/StaticFrame/6lyt/simulation.xtc",
     },
 }
 
@@ -155,19 +156,10 @@ DEFAULT_NEQUIP_CONFIG = {
     "PRNGKey_seed": SEED,
 }
 
-# DEFAULT_TRAIN_CONFIG = {
-#     "batch_size": 64,
-#     "init_lr": 0.002,
-#     "num_epochs": 20,
-#     "decay_rate": 1.0,  # No decay by default
-#     "optimizer": "adam+decay",
-# }
-
-
 DEFAULT_TRAIN_CONFIG = {
     "batch_size": 32,
     "init_lr": 0.001,
-    "num_epochs": 50,
+    "num_epochs": 5,
     "decay_rate": 0.95, 
     "optimizer": "adam+decay",
 }
@@ -202,7 +194,7 @@ DEFAULT_RE_CONFIG = {
 
 DEFAULT_SIM_CONFIG = {
     "gamma": 100.0,  # Friction coefficient in 1/ps (for NVT Langevin)
-    "dt_values_fs": [10],  # Add more dt values as needed
+    "dt_values_fs": [2],  # Add more dt values as needed
     "print_every": 0.5,  # Save frame every 0.5 ps
     "sim_mode": "sampling",  # simulation mode: 'sampling', 'stability', 'helix', 'speed'
     "ensemble": "NVT",  # NVT or NVE

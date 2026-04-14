@@ -2,8 +2,6 @@ import argparse
 import os
 import sys
 
-# Add parent directory to path to import cgbench
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")

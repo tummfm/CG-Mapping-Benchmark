@@ -55,10 +55,10 @@ def _load_bonded_from_mda(
     config_path: str,
     selection: str = "all",
 ) -> tuple:
-    """Load a GROMACS .top + .gro pair via MDAnalysis and extract bonded indices.
+    """Load GROMACS topology+structure via MDAnalysis and extract bonded indices.
 
     Args:
-        topology_path: Path to the GROMACS .top file.
+        topology_path: Path to the GROMACS topology file (.top/.itp/.tpr).
         config_path:   Path to the .gro structure file.
         selection:     MDAnalysis selection string to restrict atoms (e.g. "protein").
                        Bonded indices are re-indexed to be local to the selection.
@@ -77,7 +77,50 @@ def _load_bonded_from_mda(
             "Install with `pip install MDAnalysis`."
         ) from e
 
-    u = mda.Universe(topology_path, config_path, topology_format="ITP")
+    top_ext = os.path.splitext(topology_path)[1].lower()
+    tried_errors: list[str] = []
+
+    # Prefer extension-aware parser selection, then fall back to auto-detection.
+    universe_loaders = []
+    if top_ext in (".top", ".itp"):
+        universe_loaders.append(
+            lambda: mda.Universe(topology_path, config_path, topology_format="ITP")
+        )
+    elif top_ext == ".tpr":
+        # TPR often already contains complete topology+coordinates for the
+        # full system. Prefer loading it standalone to avoid mismatches when
+        # config_path points to a stripped/protein-only GRO.
+        universe_loaders.append(
+            lambda: mda.Universe(topology_path, topology_format="TPR")
+        )
+        universe_loaders.append(
+            lambda: mda.Universe(topology_path, config_path, topology_format="TPR")
+        )
+
+    # Auto-detection fallback for mixed/unknown topology formats.
+    universe_loaders.append(lambda: mda.Universe(topology_path, config_path))
+
+    u = None
+    for loader in universe_loaders:
+        try:
+            u = loader()
+            break
+        except Exception as e:
+            tried_errors.append(str(e))
+
+    if u is None:
+        # Last resort: load structure-only universe so downstream dataset init can
+        # proceed (atom/residue metadata remains available, bonded terms empty).
+        try:
+            u = mda.Universe(config_path)
+        except Exception:
+            ext_hint = f" (extension: {top_ext})" if top_ext else ""
+            raise ValueError(
+                "Failed to load topology with MDAnalysis"
+                f"{ext_hint}. Tried format-specific and auto-detected loaders. "
+                f"Errors: {' | '.join(tried_errors)}"
+            )
+
     ag = u.select_atoms(selection) if selection != "all" else u.atoms
 
     # Build global-index -> local-index map for the selection
@@ -89,26 +132,37 @@ def _load_bonded_from_mda(
             dtype=np.int32,
         )
 
-    bonds = (
-        _remap([[b.atoms[0].index, b.atoms[1].index] for b in ag.bonds])
-        if len(ag.bonds) > 0
-        else np.zeros((0, 2), dtype=np.int32)
-    )
-    angles = (
-        _remap([[a.atoms[0].index, a.atoms[1].index, a.atoms[2].index] for a in ag.angles])
-        if len(ag.angles) > 0
-        else np.zeros((0, 3), dtype=np.int32)
-    )
-    dihedrals = (
-        _remap(
-            [
-                [d.atoms[0].index, d.atoms[1].index, d.atoms[2].index, d.atoms[3].index]
-                for d in ag.dihedrals
-            ]
+    try:
+        bonds = (
+            _remap([[b.atoms[0].index, b.atoms[1].index] for b in ag.bonds])
+            if len(ag.bonds) > 0
+            else np.zeros((0, 2), dtype=np.int32)
         )
-        if len(ag.dihedrals) > 0
-        else np.zeros((0, 4), dtype=np.int32)
-    )
+    except Exception:
+        bonds = np.zeros((0, 2), dtype=np.int32)
+
+    try:
+        angles = (
+            _remap([[a.atoms[0].index, a.atoms[1].index, a.atoms[2].index] for a in ag.angles])
+            if len(ag.angles) > 0
+            else np.zeros((0, 3), dtype=np.int32)
+        )
+    except Exception:
+        angles = np.zeros((0, 3), dtype=np.int32)
+
+    try:
+        dihedrals = (
+            _remap(
+                [
+                    [d.atoms[0].index, d.atoms[1].index, d.atoms[2].index, d.atoms[3].index]
+                    for d in ag.dihedrals
+                ]
+            )
+            if len(ag.dihedrals) > 0
+            else np.zeros((0, 4), dtype=np.int32)
+        )
+    except Exception:
+        dihedrals = np.zeros((0, 4), dtype=np.int32)
 
     return ag, bonds, angles, dihedrals
 
@@ -1469,18 +1523,41 @@ class CATH_Dataset:
         self.cache_cg = bool(cache_cg)
         self.cached_dataset_path = cached_dataset_path
 
+        # Normalize dataset key aliases.
+        key_alias = {
+            "cath": "CATH",
+            "cath_full": "CATH",
+            "CATH_full": "CATH",
+        }
+        self.dataset_key = key_alias.get(dataset_key, dataset_key)
+
         if self.cached_dataset_path is None and self.cache_cg:
-            raw_path = MD_DATASET_PATHS[dataset_key]["path"]
+            raw_path = MD_DATASET_PATHS[self.dataset_key]["path"]
             raw_dir = os.path.dirname(raw_path)
             self.cached_dataset_path = os.path.join(
                 raw_dir,
-                f"{dataset_key}_{self.cg_strategy}_cg.npz",
+                f"{self.dataset_key}_{self.cg_strategy}_cg.npz",
             )
         
         # ------------------------------------------------------------------
         # load domain residue index
         # ------------------------------------------------------------------
-        index_path = domain_index_path or _DEFAULT_DOMAIN_INDEX
+        index_candidates = []
+        if domain_index_path is not None:
+            index_candidates.append(domain_index_path)
+        index_candidates.append(_DEFAULT_DOMAIN_INDEX)
+        index_candidates.append("/ds/project/franz/projects/CG-Bench/data/domain_residue_index.json")
+
+        index_path = None
+        for cand in index_candidates:
+            if cand is not None and os.path.exists(cand):
+                index_path = cand
+                break
+        if index_path is None:
+            raise FileNotFoundError(
+                "Could not locate domain_residue_index.json. Tried: "
+                + ", ".join([str(c) for c in index_candidates if c is not None])
+            )
         with open(index_path) as f:
             domain_index = json.load(f)
 
@@ -1491,20 +1568,146 @@ class CATH_Dataset:
         # ------------------------------------------------------------------
         # load the full multi-domain npz (all frames, all domains)
         # ------------------------------------------------------------------
-        import os
         if self.cached_dataset_path is not None and os.path.exists(self.cached_dataset_path):
             print(f"Skipping loading of full CATH dataset, will use cached CG dataset: {self.cached_dataset_path}")
             self.raw = None
         else:
-            npz_path = MD_DATASET_PATHS[dataset_key]["path"]
-            print(f"Loading full CATH dataset ({len(self.subsets_list)} domains) from: {npz_path}")
-            raw = np.load(npz_path, allow_pickle=True)
-            self.raw = dict(raw)
+            raw_path = MD_DATASET_PATHS[self.dataset_key]["path"]
+            if os.path.isdir(raw_path):
+                print(
+                    f"Building full CATH dataset ({len(self.subsets_list)} domains) "
+                    f"from per-domain folders at: {raw_path}"
+                )
+                self.raw = self._build_raw_from_domain_folders(raw_path)
+            else:
+                print(f"Loading full CATH dataset ({len(self.subsets_list)} domains) from: {raw_path}")
+                raw = np.load(raw_path, allow_pickle=True)
+                self.raw = dict(raw)
 
             print(f"  Total frames: {self.raw['R'].shape[0]}, "
                   f"padded atoms: {self.raw['R'].shape[1]}")
             print(f"  Domains in subset field: "
                   f"{len(set(self.raw['subset'].flatten().tolist()))}")
+
+    def _build_raw_from_domain_folders(self, cath_root: str) -> dict:
+        """Build a padded all-domain atomistic dataset from per-domain NPZ files.
+
+        Expected per-domain files:
+        - ``dataset.npz`` with at least ``R`` and ``F``
+        - ``md.gro`` for box size (used when ``box`` key is absent)
+
+        Output keys follow the project convention and include:
+        ``R``, ``F``, ``box``, ``cv``, ``species``, ``mask``, ``subset``.
+        """
+
+        per_domain: list[dict] = []
+        max_atoms = 0
+        used_domains = 0
+
+        for domain_idx, domain_name in enumerate(self.subsets_list):
+            domain_dir = os.path.join(cath_root, domain_name)
+            npz_path = os.path.join(domain_dir, "dataset.npz")
+            if not os.path.exists(npz_path):
+                print(f"  [SKIP] missing domain dataset: {npz_path}")
+                continue
+
+            if domain_name not in self.domain_info:
+                print(f"  [SKIP] domain '{domain_name}' missing in domain index metadata")
+                continue
+
+            n_atoms_expected = int(self.domain_info[domain_name]["n_atoms"])
+            raw = dict(np.load(npz_path, allow_pickle=True))
+
+            if "R" not in raw or "F" not in raw:
+                print(f"  [SKIP] domain '{domain_name}' missing R/F in dataset.npz")
+                continue
+
+            R = np.asarray(raw["R"], dtype=np.float32)
+            F = np.asarray(raw["F"], dtype=np.float32)
+            if R.ndim != 3 or F.ndim != 3:
+                print(f"  [SKIP] domain '{domain_name}' has invalid R/F shapes")
+                continue
+
+            n_frames = int(R.shape[0])
+            n_atoms_npz = int(R.shape[1])
+            n_atoms_use = min(n_atoms_expected, n_atoms_npz)
+
+            # Solvent/water is removed by truncating to domain metadata atom count.
+            R = R[:, :n_atoms_use, :]
+            F = F[:, :n_atoms_use, :]
+
+            if "species" in raw:
+                species = np.asarray(raw["species"], dtype=np.int32)
+                if species.ndim == 1:
+                    species = np.tile(species[None, :], (n_frames, 1))
+                species = species[:, :n_atoms_use]
+            else:
+                species = np.zeros((n_frames, n_atoms_use), dtype=np.int32)
+
+            if "cv" in raw:
+                cv = np.asarray(raw["cv"], dtype=np.float32).reshape(-1)
+            else:
+                cv = np.zeros((n_frames,), dtype=np.float32)
+
+            if "box" in raw:
+                box = np.asarray(raw["box"], dtype=np.float32)
+                if box.ndim == 2:
+                    box = np.tile(box[None, :, :], (n_frames, 1, 1))
+            else:
+                gro_path = os.path.join(domain_dir, "md.gro")
+                if not os.path.exists(gro_path):
+                    print(f"  [SKIP] domain '{domain_name}' missing md.gro for box")
+                    continue
+                box0 = _load_single_gro_snapshot_dataset(gro_path)["box"][0]
+                box = np.tile(np.asarray(box0, dtype=np.float32)[None, :, :], (n_frames, 1, 1))
+
+            mask = np.ones((n_frames, n_atoms_use), dtype=bool)
+            subset = np.full((n_frames,), domain_idx, dtype=np.int32)
+
+            per_domain.append(
+                {
+                    "domain_name": domain_name,
+                    "R": R,
+                    "F": F,
+                    "species": species,
+                    "cv": cv,
+                    "box": box,
+                    "mask": mask,
+                    "subset": subset,
+                    "n_atoms": n_atoms_use,
+                }
+            )
+            max_atoms = max(max_atoms, n_atoms_use)
+            used_domains += 1
+            print(
+                f"  [OK] {domain_name}: frames={n_frames}, atoms={n_atoms_use} "
+                f"(npz={n_atoms_npz}, meta={n_atoms_expected})"
+            )
+
+        if not per_domain:
+            raise RuntimeError("No CATH domain datasets were loaded from per-domain folders.")
+
+        all_R, all_F, all_species, all_cv, all_box, all_mask, all_subset = ([] for _ in range(7))
+        for d in per_domain:
+            pad = max_atoms - d["n_atoms"]
+            all_R.append(np.pad(d["R"], ((0, 0), (0, pad), (0, 0))))
+            all_F.append(np.pad(d["F"], ((0, 0), (0, pad), (0, 0))))
+            all_species.append(np.pad(d["species"], ((0, 0), (0, pad))))
+            all_mask.append(np.pad(d["mask"], ((0, 0), (0, pad)), constant_values=False))
+            all_cv.append(d["cv"])
+            all_box.append(d["box"])
+            all_subset.append(d["subset"])
+
+        print(f"Built CATH full dataset from {used_domains} domains, max atoms={max_atoms}")
+        return {
+            "R": np.concatenate(all_R, axis=0).astype(np.float32),
+            "F": np.concatenate(all_F, axis=0).astype(np.float32),
+            "species": np.concatenate(all_species, axis=0).astype(np.int32),
+            "cv": np.concatenate(all_cv, axis=0).astype(np.float32),
+            "box": np.concatenate(all_box, axis=0).astype(np.float32),
+            "mask": np.concatenate(all_mask, axis=0),
+            "subset": np.concatenate(all_subset, axis=0).astype(np.int32),
+        }
 
     # ------------------------------------------------------------------
     def coarse_grain_all(self) -> dict:
