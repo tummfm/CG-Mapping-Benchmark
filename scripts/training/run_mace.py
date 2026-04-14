@@ -61,6 +61,7 @@ parser.add_argument(
 )
 parser.add_argument("--decay-rate", type=float, default=None, help="Override DEFAULT_TRAIN_CONFIG.decay_rate")
 parser.add_argument("--optimizer", type=str, default=None, help="Override DEFAULT_TRAIN_CONFIG.optimizer")
+parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers for dataset loading")
 args = parser.parse_args()
 
 if args.device:
@@ -303,7 +304,6 @@ def _load_training_dataset(mol, train_ratio, val_ratio, cg_map, stride):
         "capped_ala15": dataset.Capped_Ala15_Dataset,
         "hexane": dataset.Hexane_Dataset,
         "benzene_crystal": dataset.BenzeneCrystal_Dataset,
-        "benzene_crystal_288": dataset.BenzeneCrystal288_Dataset,
         "capped_pro": dataset.Capped_Pro_Dataset,
         "capped_thr": dataset.Capped_Thr_Dataset,
         "capped_gly": dataset.Capped_Gly_Dataset,
@@ -355,7 +355,7 @@ MACE_CONFIG["mol"], data, used_prestrided_cache = _load_training_dataset(
 # AT
 if MACE_CONFIG["type"] == "AT":
     if hasattr(data, "load_traj"):
-        data.load_traj()
+        data.load_traj(workers=args.workers) if isinstance(data, dataset.MixedDataset) else data.load_traj()
     dataset_raw = data.dataset_U
     displacement_fn = data.displacement_fn_U
     species = data.species
@@ -364,6 +364,7 @@ if MACE_CONFIG["type"] == "AT":
 # CG
 elif MACE_CONFIG["type"] == "CG":
     cg_cache_path = None
+    _cg_kwargs = {"workers": args.workers} if isinstance(data, dataset.MixedDataset) else {}
     if MACE_CONFIG["mol"] in ["cath_full", "cath_quarter", "cath_test"]:
         _mol_size = MACE_CONFIG["mol"].split("_", 1)[1]  # "full", "quarter", or "test"
         cached_path = getattr(
@@ -373,11 +374,11 @@ elif MACE_CONFIG["type"] == "CG":
         )
         cg_cache_path = cached_path
         if os.path.exists(cached_path):
-            data.coarse_grain(map=MACE_CONFIG["CG_map"], cached_dataset_path=cached_path)
+            data.coarse_grain(map=MACE_CONFIG["CG_map"], cached_dataset_path=cached_path, **_cg_kwargs)
         else:
-            data.coarse_grain(map=MACE_CONFIG["CG_map"])
+            data.coarse_grain(map=MACE_CONFIG["CG_map"], **_cg_kwargs)
     else:
-        data.coarse_grain(map=MACE_CONFIG["CG_map"])
+        data.coarse_grain(map=MACE_CONFIG["CG_map"], **_cg_kwargs)
 
     # Persist newly mapped CATH datasets so future runs can load them directly.
     if cg_cache_path and (not os.path.exists(cg_cache_path)):
@@ -607,10 +608,6 @@ if "testing" in dataset_frac:
 # -------------------------
 # Run training and save results
 # -------------------------
-
-# breakpoint()
-
-
 epochs = train_config["optimizer"]["epochs"]
 trainer_fm.train(epochs)
 

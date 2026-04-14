@@ -106,12 +106,12 @@ def get_map_weights(
     """Compute mass-weighted mapping matrix from atom→CG-site assignment.
 
     Args:
-        map_arr:      (n_atoms,) int32 – CG site index per atom; -1 = excluded.
-        at_masses_arr:(n_atoms,) float32 – atomic masses.
-        cg_masses:    (n_cg,)   float32 – total mass per CG site.
+        map_arr:      (n_atoms,) int32 - CG site index per atom; -1 = excluded.
+        at_masses_arr:(n_atoms,) float32 - atomic masses.
+        cg_masses:    (n_cg,)   float32 - total mass per CG site.
 
     Returns:
-        weights: (n_cg, n_atoms) float32 – row-normalised (rows sum to 1).
+        weights: (n_cg, n_atoms) float32 - row-normalised (rows sum to 1).
     """
     valid = map_arr >= 0
     clipped = jnp.where(valid, map_arr, 0)
@@ -121,96 +121,6 @@ def get_map_weights(
         cg_masses[:, None] > 0, at_masses_arr[None, :] / cg_masses[:, None], 0.0
     )
     return onehot * per_atom_w
-
-
-# ---------------------------------------------------------------------------
-# CG bond-type computation from the atomistic graph
-# ---------------------------------------------------------------------------
-
-def compute_cg_bond_types(
-    at_bonds: list[tuple[int, int]],
-    mapping_indices: list[int],
-    max_sep: int = 4,
-) -> dict[str, list[list[int]]]:
-    """Compute CG-site bond types from the atomistic bond graph.
-
-    Uses a two-step approach:
-    1. Build a CG adjacency graph: two CG sites are adjacent if any atom in
-       one can reach any atom in the other through only unmapped intermediates.
-    2. BFS on the CG graph to get CG-level distances, then bucket:
-       - bond_0: CG distance 1 (directly bonded, 1-2)
-       - bond_1: CG distance 2 (1-3 in CG graph)
-       - bond_2: CG distance 3 (1-4 in CG graph)
-       - bond_3: CG distance 4 (1-5 in CG graph)
-
-    Args:
-        at_bonds:        List of 0-indexed (i, j) atomistic bond pairs.
-        mapping_indices: Per-atom CG-site assignment (-1 = excluded).
-        max_sep:         Maximum CG-graph path length to consider (default 4).
-
-    Returns:
-        Dict with keys bond_0 … bond_3, each a sorted list of [cg_i, cg_j] pairs.
-    """
-    adj: dict[int, set[int]] = defaultdict(set)
-    for i, j in at_bonds:
-        adj[i].add(j)
-        adj[j].add(i)
-
-    mapped_atoms = [i for i, cg in enumerate(mapping_indices) if cg >= 0]
-
-    # Step 1: build CG adjacency (traverse through unmapped intermediates).
-    cg_adj: dict[int, set[int]] = defaultdict(set)
-    for start in mapped_atoms:
-        cg_start = mapping_indices[start]
-        visited: set[int] = {start}
-        queue: deque[int] = deque([start])
-        while queue:
-            node = queue.popleft()
-            for nb in adj[node]:
-                if nb in visited:
-                    continue
-                visited.add(nb)
-                nb_cg = mapping_indices[nb]
-                if nb_cg >= 0:
-                    if nb_cg != cg_start:
-                        cg_adj[cg_start].add(nb_cg)
-                else:
-                    queue.append(nb)
-
-    # Step 2: BFS on CG graph for CG-level distances.
-    cg_sites = sorted(set(mapping_indices[i] for i in mapped_atoms))
-    cg_pair_min: dict[tuple[int, int], int] = {}
-
-    for start_cg in cg_sites:
-        dist_cg: dict[int, int] = {start_cg: 0}
-        queue_cg: deque[int] = deque([start_cg])
-        while queue_cg:
-            curr = queue_cg.popleft()
-            if dist_cg[curr] >= max_sep:
-                continue
-            for nb_cg in cg_adj[curr]:
-                if nb_cg not in dist_cg:
-                    dist_cg[nb_cg] = dist_cg[curr] + 1
-                    queue_cg.append(nb_cg)
-
-        for other_cg, d in dist_cg.items():
-            if d == 0:
-                continue
-            pair = (min(start_cg, other_cg), max(start_cg, other_cg))
-            if pair not in cg_pair_min or cg_pair_min[pair] > d:
-                cg_pair_min[pair] = d
-
-    buckets: dict[int, list[list[int]]] = {0: [], 1: [], 2: [], 3: []}
-    for (i, j), d in sorted(cg_pair_min.items()):
-        if 1 <= d <= 4:
-            buckets[d - 1].append([i, j])
-
-    return {
-        "bond_0": buckets[0],
-        "bond_1": buckets[1],
-        "bond_2": buckets[2],
-        "bond_3": buckets[3],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +208,184 @@ def _tile_topology(
     return _arr(bonds, 2), _arr(angles, 3), _arr(dihedrals, 4)
 
 
+def _arr_topology(terms: list[list[int]], ncols: int) -> np.ndarray:
+    return np.array(terms, dtype=np.int32).T if terms else np.zeros((ncols, 0), dtype=np.int32)
+
+
+def _atomistic_angles_from_bonds(at_bonds: list[tuple[int, int]]) -> list[list[int]]:
+    """Build unique atomistic angles [i, j, k] from undirected bonds."""
+    neighbors: dict[int, set[int]] = defaultdict(set)
+    for i, j in at_bonds:
+        neighbors[int(i)].add(int(j))
+        neighbors[int(j)].add(int(i))
+
+    angles: list[list[int]] = []
+    for j in sorted(neighbors):
+        nbrs = sorted(neighbors[j])
+        for a in range(len(nbrs)):
+            for b in range(a + 1, len(nbrs)):
+                angles.append([nbrs[a], j, nbrs[b]])
+    return angles
+
+
+def _atomistic_dihedrals_from_bonds(at_bonds: list[tuple[int, int]]) -> list[list[int]]:
+    """Build unique atomistic dihedrals [i, j, k, l] from undirected bonds."""
+    neighbors: dict[int, set[int]] = defaultdict(set)
+    for i, j in at_bonds:
+        neighbors[int(i)].add(int(j))
+        neighbors[int(j)].add(int(i))
+
+    seen: set[tuple[int, int, int, int]] = set()
+    dihedrals: list[list[int]] = []
+    for j in sorted(neighbors):
+        for k in sorted(neighbors[j]):
+            if j >= k:
+                continue
+            for i in sorted(neighbors[j]):
+                if i == k:
+                    continue
+                for l in sorted(neighbors[k]):
+                    if l == j or l == i:
+                        continue
+                    fwd = (i, j, k, l)
+                    rev = (l, k, j, i)
+                    canon = min(fwd, rev)
+                    if canon not in seen:
+                        seen.add(canon)
+                        dihedrals.append(list(canon))
+    dihedrals.sort()
+    return dihedrals
+
+
+def _project_atomistic_terms_to_cg(
+    atom_terms: list[list[int]] | list[tuple[int, ...]],
+    mapping_indices: list[int],
+) -> list[list[int]]:
+    """Project atomistic bonds/angles/dihedrals to CG indices and deduplicate."""
+    if not atom_terms:
+        return []
+
+    size = len(atom_terms[0])
+    if size not in (2, 3, 4):
+        raise ValueError(f"Unsupported topology term size: {size}")
+
+    uniq: set[tuple[int, ...]] = set()
+    for term in atom_terms:
+        cg_term = [int(mapping_indices[int(a)]) for a in term]
+        if any(v < 0 for v in cg_term):
+            continue
+        if len(set(cg_term)) != size:
+            continue
+
+        tup = tuple(cg_term)
+        if size == 2:
+            canon = (min(tup[0], tup[1]), max(tup[0], tup[1]))
+        else:
+            canon = min(tup, tuple(reversed(tup)))
+        uniq.add(canon)
+
+    return [list(t) for t in sorted(uniq)]
+
+
+def _slice_cg_topology_from_atomistic(
+    at_bonds: list[tuple[int, int]],
+    mapping_indices: list[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project atomistic topology to CG by dropping removed atoms."""
+    at_angles = _atomistic_angles_from_bonds(at_bonds)
+    at_dihedrals = _atomistic_dihedrals_from_bonds(at_bonds)
+
+    cg_bonds = _project_atomistic_terms_to_cg(at_bonds, mapping_indices)
+    cg_angles = _project_atomistic_terms_to_cg(at_angles, mapping_indices)
+    cg_dihedrals = _project_atomistic_terms_to_cg(at_dihedrals, mapping_indices)
+
+    return _arr_topology(cg_bonds, 2), _arr_topology(cg_angles, 3), _arr_topology(cg_dihedrals, 4)
+
+
+def _compute_bond_types_from_cg_bond_index(
+    cg_bond_index: np.ndarray,
+    max_sep: int = 4,
+) -> dict[str, list[list[int]]]:
+    """Compute bond_0..bond_3 buckets from direct CG bonds."""
+    if cg_bond_index.size == 0:
+        return {"bond_0": [], "bond_1": [], "bond_2": [], "bond_3": []}
+
+    adj: dict[int, set[int]] = defaultdict(set)
+    for i, j in np.asarray(cg_bond_index, dtype=np.int32).T:
+        ii, jj = int(i), int(j)
+        if ii == jj:
+            continue
+        adj[ii].add(jj)
+        adj[jj].add(ii)
+
+    pair_min: dict[tuple[int, int], int] = {}
+    for start in sorted(adj):
+        dist: dict[int, int] = {start: 0}
+        queue: deque[int] = deque([start])
+        while queue:
+            cur = queue.popleft()
+            if dist[cur] >= max_sep:
+                continue
+            for nb in adj[cur]:
+                if nb not in dist:
+                    dist[nb] = dist[cur] + 1
+                    queue.append(nb)
+
+        for other, d in dist.items():
+            if d == 0:
+                continue
+            p = (min(start, other), max(start, other))
+            if p not in pair_min or d < pair_min[p]:
+                pair_min[p] = d
+
+    buckets: dict[int, list[list[int]]] = {0: [], 1: [], 2: [], 3: []}
+    for (i, j), d in sorted(pair_min.items()):
+        if 1 <= d <= 4:
+            buckets[d - 1].append([i, j])
+
+    return {
+        "bond_0": buckets[0],
+        "bond_1": buckets[1],
+        "bond_2": buckets[2],
+        "bond_3": buckets[3],
+    }
+
+
+def _build_explicit_residue_topology(
+    residue_name: str,
+    strategy: str,
+    cg_map: dict,
+    cg_offset: int,
+    n_local_cg: int,
+) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+    """Read explicit per-residue CG topology and offset indices to global space."""
+    missing = [k for k in ("bonds", "angles", "dihedrals") if k not in cg_map]
+    if missing:
+        raise ValueError(
+            f"mapping_type='com' requires explicit topology in residue_maps.json for "
+            f"residue '{residue_name}', strategy '{strategy}'. Missing keys: {missing}"
+        )
+
+    def _shift_terms(key: str, size: int) -> list[list[int]]:
+        shifted: list[list[int]] = []
+        for term in cg_map.get(key, []):
+            if len(term) != size:
+                raise ValueError(
+                    f"Invalid {key} term length for residue '{residue_name}', "
+                    f"strategy '{strategy}': expected {size}, got {len(term)}"
+                )
+            vals = [int(v) for v in term]
+            if any(v < 0 or v >= n_local_cg for v in vals):
+                raise ValueError(
+                    f"Out-of-range {key} term for residue '{residue_name}', "
+                    f"strategy '{strategy}': {vals} (n_local_cg={n_local_cg})"
+                )
+            shifted.append([v + cg_offset for v in vals])
+        return shifted
+
+    return _shift_terms("bonds", 2), _shift_terms("angles", 3), _shift_terms("dihedrals", 4)
+
+
 # ---------------------------------------------------------------------------
 # Hexane_Map
 # ---------------------------------------------------------------------------
@@ -306,7 +394,7 @@ class Hexane_Map:
     """CG mapping for liquid hexane (multi-molecule system).
 
     Each hexane molecule (20 atoms: CH3-CH2-CH2-CH2-CH2-CH3) can be mapped
-    to 2–6 CG sites.  All CG topologies are linear chains.
+    to 2-6 CG sites.  All CG topologies are linear chains.
 
     Available maps: six-site, four-site, three-site, two-site,
                     two-site-Map2, A3, A4.
@@ -433,20 +521,6 @@ class Hexane_Map:
         d = self._maps[name]
         return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
 
-    def get_bond_types(self, name: str) -> dict[str, list[list[int]]]:
-        """Derive CG bond types from the atomistic graph (backward compat)."""
-        if name not in self._maps:
-            raise ValueError(f"Invalid map '{name}'.")
-        indices = self._maps[name]["indices"]
-        tiled_bonds: list[tuple[int, int]] = []
-        mol_size = 20
-        for mol in range(self.n_replicas):
-            off = mol * mol_size
-            for a, b in self._at_bonds_single:
-                tiled_bonds.append((a + off, b + off))
-        return compute_cg_bond_types(tiled_bonds, indices)
-
-
 # ---------------------------------------------------------------------------
 # BenzeneCrystal_Map
 # ---------------------------------------------------------------------------
@@ -539,21 +613,6 @@ class BenzeneCrystal_Map:
         d = self._maps[name]
         return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
 
-    def get_bond_types(self, name: str = "three-site-adjacent") -> dict:
-        """Derive CG bond types from the atomistic graph (backward compat)."""
-        name = self._normalize_map_name(name)
-        if name not in self._maps:
-            raise ValueError(f"Invalid map '{name}'.")
-        indices = self._maps[name]["indices"]
-        tiled_bonds: list[tuple[int, int]] = []
-        mol_size = 12
-        for mol in range(self.n_replicas):
-            off = mol * mol_size
-            for a, b in self._at_bonds_single:
-                tiled_bonds.append((a + off, b + off))
-        return compute_cg_bond_types(tiled_bonds, indices)
-
-
 # ---------------------------------------------------------------------------
 # CappedPeptideMap
 # ---------------------------------------------------------------------------
@@ -564,17 +623,20 @@ class CappedPeptideMap:
     Automatically builds all CG maps that are available for every residue in
     the given sequence (intersection of per-residue available strategies).
 
-    The atomistic topology (masses, bonds) is loaded from residue_maps.json;
-    the CG topology (bonds, angles, dihedrals) is derived via
-    :func:`compute_cg_bond_types` and :func:`_derive_cg_topology`.
+    The atomistic topology (masses, bonds) is loaded from residue_maps.json.
 
     Args:
         residue_sequence: Ordered list of residue names,
             e.g. ``["ACE", "ALA", "NME"]``.
     """
 
-    def __init__(self, residue_sequence: list[str]):
+    def __init__(self, residue_sequence: list[str], mapping_type: str = "slice"):
         residue_maps = _load_residue_maps_json()
+        if mapping_type not in ("slice", "com"):
+            raise ValueError(
+                f"Invalid mapping_type '{mapping_type}'. Choose one of ['slice', 'com']."
+            )
+        self.mapping_type = mapping_type
 
         for res in residue_sequence:
             if res not in residue_maps:
@@ -623,6 +685,9 @@ class CappedPeptideMap:
         for strategy in sorted(all_strategies):
             indices: list[int] = []
             cg_species: list[int] = []
+            explicit_bonds: list[list[int]] = []
+            explicit_angles: list[list[int]] = []
+            explicit_dihedrals: list[list[int]] = []
             cg_offset = 0
 
             for ri, res in enumerate(residue_sequence):
@@ -633,11 +698,30 @@ class CappedPeptideMap:
                 for local_idx in local_indices:
                     indices.append(-1 if local_idx < 0 else int(local_idx) + cg_offset)
                 cg_species.extend(int(s) for s in local_species)
+
+                if self.mapping_type == "com":
+                    b, a, d = _build_explicit_residue_topology(
+                        residue_name=res,
+                        strategy=strategy,
+                        cg_map=cg_map,
+                        cg_offset=cg_offset,
+                        n_local_cg=len(local_species),
+                    )
+                    explicit_bonds.extend(b)
+                    explicit_angles.extend(a)
+                    explicit_dihedrals.extend(d)
+
                 cg_offset += len(local_species)
 
-            # CG topology from atomistic bond graph
-            bond_types = compute_cg_bond_types(at_bonds, indices)
-            cg_bonds, cg_angles, cg_dihedrals = _derive_cg_topology(bond_types["bond_0"])
+            if self.mapping_type == "slice":
+                cg_bonds, cg_angles, cg_dihedrals = _slice_cg_topology_from_atomistic(
+                    at_bonds=at_bonds,
+                    mapping_indices=indices,
+                )
+            else:
+                cg_bonds = _arr_topology(explicit_bonds, 2)
+                cg_angles = _arr_topology(explicit_angles, 3)
+                cg_dihedrals = _arr_topology(explicit_dihedrals, 4)
 
             self._maps[strategy] = {
                 "indices": indices,
@@ -681,13 +765,6 @@ class CappedPeptideMap:
             raise ValueError(f"Invalid map '{name}'.")
         d = self._maps[name]
         return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
-
-    def get_bond_types(self, name: str) -> dict[str, list[list[int]]]:
-        """Return CG bond types dict (backward compat)."""
-        if name not in self._maps:
-            raise ValueError(f"Invalid map '{name}'.")
-        return compute_cg_bond_types(self._at_bonds, self._maps[name]["indices"])
-
 
 # ---------------------------------------------------------------------------
 # TIP3P_Water_Map
@@ -800,31 +877,46 @@ class CATH_Map:
         self,
         domain_name: str,
         cg_strategy: str = "CA",
+        mapping_type: str = "slice",
         residue_maps_path: str | None = None,
         domain_index_path: str | None = None,
+        residue_names=None,
+        residue_ids=None,
+        n_atoms: int | None = None,
     ):
         self.domain_name = domain_name
         self.cg_strategy = cg_strategy
+        if mapping_type not in ("slice", "com"):
+            raise ValueError(
+                f"Invalid mapping_type '{mapping_type}'. Choose one of ['slice', 'com']."
+            )
+        self.mapping_type = mapping_type
 
         residue_maps_path = residue_maps_path or _DEFAULT_RESIDUE_MAPS
-        domain_index_path = domain_index_path or _DEFAULT_DOMAIN_INDEX
 
         with open(residue_maps_path) as f:
             residue_maps = _json.load(f)
-        with open(domain_index_path) as f:
-            domain_index = _json.load(f)
 
-        if domain_name not in domain_index["domains"]:
-            avail = list(domain_index["domains"].keys())
-            raise ValueError(
-                f"Domain '{domain_name}' not found in domain_residue_index.json. "
-                f"Available (first 5): {avail[:5]}"
-            )
+        if residue_names is None or residue_ids is None:
+            domain_index_path = domain_index_path or _DEFAULT_DOMAIN_INDEX
+            with open(domain_index_path) as f:
+                domain_index = _json.load(f)
 
-        domain_info = domain_index["domains"][domain_name]
-        residue_names = domain_info["residue_names"]
-        residue_ids = domain_info["residue_ids"]
-        self.n_atoms = domain_info["n_atoms"]
+            if domain_name not in domain_index["domains"]:
+                avail = list(domain_index["domains"].keys())
+                raise ValueError(
+                    f"Domain '{domain_name}' not found in domain_residue_index.json. "
+                    f"Available (first 5): {avail[:5]}"
+                )
+
+            domain_info = domain_index["domains"][domain_name]
+            residue_names = domain_info["residue_names"]
+            residue_ids = domain_info["residue_ids"]
+            self.n_atoms = domain_info["n_atoms"]
+        else:
+            residue_names = list(residue_names)
+            residue_ids = list(residue_ids)
+            self.n_atoms = n_atoms if n_atoms is not None else len(residue_ids)
 
         first_res = residue_names[0] if residue_names else ""
         last_res = residue_names[-1] if residue_names else ""
@@ -843,12 +935,15 @@ class CATH_Map:
         global_indices: list[int] = [-1] * self.n_atoms
         global_cg_species: list[int] = []
         at_masses: list[float] = []
+        explicit_bonds: list[list[int]] = []
+        explicit_angles: list[list[int]] = []
+        explicit_dihedrals: list[list[int]] = []
         cg_offset = 0
 
         for (res_id, res_name), atom_idxs in residues.items():
             n_res_atoms = len(atom_idxs)
             if res_name not in residue_maps:
-                print(f"  [WARN] residue '{res_name}' not in residue_maps.json – skipped")
+                print(f"  [WARN] residue '{res_name}' not in residue_maps.json - skipped")
                 at_masses.extend([12.011] * n_res_atoms)
                 continue
 
@@ -875,6 +970,19 @@ class CATH_Map:
                     global_indices[ai] = cg_offset + int(local_cg)
 
             global_cg_species.extend(int(s) for s in local_species)
+
+            if self.mapping_type == "com":
+                b, a, d = _build_explicit_residue_topology(
+                    residue_name=res_name,
+                    strategy=cg_strategy,
+                    cg_map=cg_maps[cg_strategy],
+                    cg_offset=cg_offset,
+                    n_local_cg=len(local_species),
+                )
+                explicit_bonds.extend(b)
+                explicit_angles.extend(a)
+                explicit_dihedrals.extend(d)
+
             cg_offset += len(local_species)
 
             # Masses
@@ -913,10 +1021,15 @@ class CATH_Map:
         self._at_bonds = at_bonds
 
         # Pre-compute CG topology
-        bond_types = compute_cg_bond_types(self._at_bonds, self._indices)
-        self._cg_bonds, self._cg_angles, self._cg_dihedrals = _derive_cg_topology(
-            bond_types["bond_0"]
-        )
+        if self.mapping_type == "slice":
+            self._cg_bonds, self._cg_angles, self._cg_dihedrals = _slice_cg_topology_from_atomistic(
+                at_bonds=self._at_bonds,
+                mapping_indices=self._indices,
+            )
+        else:
+            self._cg_bonds = _arr_topology(explicit_bonds, 2)
+            self._cg_angles = _arr_topology(explicit_angles, 3)
+            self._cg_dihedrals = _arr_topology(explicit_dihedrals, 4)
 
     def get_available_maps(self) -> list[str]:
         return [self.cg_strategy]
@@ -945,164 +1058,3 @@ class CATH_Map:
         """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
         return self._cg_bonds, self._cg_angles, self._cg_dihedrals
 
-    def get_bond_types(self, name: str | None = None) -> dict:
-        """Return CG bond types dict (backward compat)."""
-        return compute_cg_bond_types(self._at_bonds, self._indices, max_sep=4)
-
-
-# ---------------------------------------------------------------------------
-# UncappedProteinMap  (for STATIC_FRAME datasets)
-# ---------------------------------------------------------------------------
-
-class UncappedProteinMap:
-    """CG mapping for proteins loaded via MDAnalysis (e.g. STATIC_FRAME datasets).
-
-    Unlike :class:`CATH_Map`, this class:
-    - Accepts per-atom residue metadata directly (from MDAnalysis).
-    - Does not require ACE/NME caps.
-    - Gracefully skips residues absent from ``residue_maps.json`` or whose
-      atom count mismatches the reference (warning is printed).
-
-    Args:
-        residue_ids:    (n_atoms,) per-atom residue IDs (1-based int array).
-        residue_names:  (n_atoms,) per-atom residue name strings.
-        atom_names:     (n_atoms,) per-atom GRO/PDB atom name strings.
-        cg_strategy:    Strategy key in residue_maps.json (default ``"coreBetaMap2"``).
-        residue_maps_path: Optional override path.
-    """
-
-    def __init__(
-        self,
-        residue_ids: np.ndarray,
-        residue_names: np.ndarray,
-        atom_names: np.ndarray,
-        cg_strategy: str = "coreBetaMap2",
-        residue_maps_path: str | None = None,
-    ):
-        self.cg_strategy = cg_strategy
-        n_atoms = len(residue_ids)
-
-        rmap_path = residue_maps_path or _DEFAULT_RESIDUE_MAPS
-        with open(rmap_path) as f:
-            residue_maps = _json.load(f)
-
-        # Group atoms by (residue_id, residue_name), preserving insertion order
-        from collections import OrderedDict
-        residues: "OrderedDict[tuple, list[int]]" = OrderedDict()
-        for ai, (res_id, res_name) in enumerate(zip(residue_ids, residue_names)):
-            key = (int(res_id), str(res_name))
-            residues.setdefault(key, []).append(ai)
-
-        global_indices: list[int] = [-1] * n_atoms
-        global_cg_species: list[int] = []
-        at_masses: list[float] = []
-        cg_offset = 0
-
-        for (res_id, res_name), atom_idxs in residues.items():
-            n_res = len(atom_idxs)
-            if res_name not in residue_maps:
-                print(f"  [WARN] residue '{res_name}' not in residue_maps.json – skipped")
-                at_masses.extend([12.011] * n_res)
-                continue
-
-            res_data = residue_maps[res_name]
-            cg_maps = res_data.get("cg_maps", {})
-            if cg_strategy not in cg_maps:
-                print(
-                    f"  [WARN] strategy '{cg_strategy}' missing for '{res_name}' – skipped"
-                )
-                masses = res_data.get("masses", [12.011] * n_res)
-                at_masses.extend(masses[:n_res])
-                continue
-
-            local_indices = cg_maps[cg_strategy]["indices"]
-            local_species = cg_maps[cg_strategy]["cg_species"]
-
-            if len(local_indices) != n_res:
-                print(
-                    f"  [WARN] residue '{res_name}' (id={res_id}): atom count mismatch "
-                    f"({n_res} in structure, {len(local_indices)} in residue_maps) – skipped"
-                )
-                masses = res_data.get("masses", [12.011] * n_res)
-                at_masses.extend(masses[:n_res])
-                continue
-
-            for local_pos, ai in enumerate(atom_idxs):
-                local_cg = local_indices[local_pos]
-                if local_cg >= 0:
-                    global_indices[ai] = cg_offset + int(local_cg)
-
-            global_cg_species.extend(int(s) for s in local_species)
-            cg_offset += len(local_species)
-
-            masses = res_data.get("masses")
-            if masses and len(masses) == n_res:
-                at_masses.extend(masses)
-            else:
-                syms = res_data.get("symbols", [])
-                at_masses.extend(_SYM_TO_MASS.get(str(s), 12.011) for s in syms[:n_res])
-
-        self.at_masses = at_masses
-        self._indices = global_indices
-        self._cg_species = np.array(global_cg_species, dtype=np.int32)
-        self._n_cg = len(global_cg_species)
-
-        # Atomistic bonds
-        at_bonds: list[tuple[int, int]] = []
-        res_items = list(residues.items())
-        for (_, res_name), atom_idxs in res_items:
-            if res_name not in residue_maps:
-                continue
-            for li, lj in residue_maps[res_name].get("at_bonds", []):
-                if li < len(atom_idxs) and lj < len(atom_idxs):
-                    at_bonds.append((atom_idxs[li], atom_idxs[lj]))
-
-        for k in range(len(res_items) - 1):
-            (_, rname_k), atoms_k = res_items[k]
-            (_, rname_k1), atoms_k1 = res_items[k + 1]
-            if rname_k not in residue_maps or rname_k1 not in residue_maps:
-                continue
-            c_idx = residue_maps[rname_k].get("backbone_C_idx")
-            n_idx = residue_maps[rname_k1].get("backbone_N_idx")
-            if c_idx is not None and n_idx is not None:
-                if c_idx < len(atoms_k) and n_idx < len(atoms_k1):
-                    at_bonds.append((atoms_k[c_idx], atoms_k1[n_idx]))
-
-        self._at_bonds = at_bonds
-
-        # Pre-compute CG topology
-        bond_types = compute_cg_bond_types(self._at_bonds, self._indices)
-        self._cg_bonds, self._cg_angles, self._cg_dihedrals = _derive_cg_topology(
-            bond_types["bond_0"]
-        )
-
-    def get_available_maps(self) -> list[str]:
-        return [self.cg_strategy]
-
-    def get_map(self, name: str | None = None) -> tuple:
-        """Return (map_indices, cg_species, cg_masses, weights)."""
-        indices = self._indices
-        cg_species = self._cg_species
-        n_cg = self._n_cg
-
-        indices_arr = jnp.array(indices, dtype=jnp.int32)
-        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
-        valid_mask = indices_arr >= 0
-        clipped = jnp.where(valid_mask, indices_arr, 0)
-        cg_masses = jax.ops.segment_sum(
-            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
-        )
-        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
-        return indices, cg_species, cg_masses, weights
-
-    def get_cg_topology(self, name: str | None = None) -> tuple:
-        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
-        return self._cg_bonds, self._cg_angles, self._cg_dihedrals
-
-    def get_bond_types(self, name: str | None = None) -> dict:
-        """Return CG bond types dict (backward compat)."""
-        return compute_cg_bond_types(self._at_bonds, self._indices, max_sep=4)
-
-
-# Alias for backward compatibility with _ProSolUncappedProteinDataset
-UncappedCATHLike_Map = UncappedProteinMap

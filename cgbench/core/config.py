@@ -6,10 +6,10 @@ MD_DATASET_PATHS = {
     "hexane": {
         "path": f"{BASE_DATASET_PATH}/liquid_hexane/hexane_ttot=100ns_dt=1fs_nstxout=200.npz",
         "config": f"{BASE_DATASET_PATH}/liquid_hexane/md.gro",
-        "topology": f"{BASE_DATASET_PATH}/liquid_hexane/topol.top",
+        "topology": f"{BASE_DATASET_PATH}/liquid_hexane/md.tpr",
         "traj": f"{BASE_DATASET_PATH}/liquid_hexane/md.xtc",
     },
-    "benzene_crystal_288": {
+    "benzene_crystal": {
         "path": f"{BASE_DATASET_PATH}/benzene_crystal_288/benzene_crystal_288.npz",
         "config": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_elong_nvt_1.gro",
         "topology": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_prod_1fs.tpr",

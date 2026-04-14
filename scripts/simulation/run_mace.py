@@ -182,27 +182,17 @@ def _load_simulation_dataset(mol, train_ratio, val_ratio, cg_map, model_type):
     if mol in basic_loaders:
         cls, nmol = basic_loaders[mol]
         data_obj = cls(train_ratio=train_ratio, val_ratio=val_ratio)
-        return mol, data_obj, nmol, False
+        return mol, data_obj, nmol
 
     if mol == "benzene_crystal":
         data_obj = dataset.BenzeneCrystal_Dataset(train_ratio=train_ratio, val_ratio=val_ratio)
-        nmol = _infer_nmol_from_map(data_obj, default=128)
-        return mol, data_obj, nmol, False
+        nmol = _infer_nmol_from_map(data_obj)
+        return mol, data_obj, nmol
 
     if mol == "tip3p" or mol == "tip3p-water":
         data_obj = dataset.TIP3P_water_Dataset(train_ratio=train_ratio, val_ratio=val_ratio)
         nmol = _infer_nmol_from_map(data_obj, default=901)
-        return mol, data_obj, nmol, False
-
-    if mol == "benzene_crystal_288":
-        data_obj = dataset.BenzeneCrystal288_Dataset(
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
-            cg_map=cg_map,
-            prefer_cg_cache=(model_type == "CG"),
-        )
-        nmol = int(getattr(data_obj, "nmol", data_obj.map_obj.n_replicas))
-        return mol, data_obj, nmol, False
+        return mol, data_obj, nmol
 
     if mol in ("CATH", "cath", "cath_full", "cath_quarter", "cath_test"):
         dataset_key = "cath_full" if mol in ("CATH", "cath") else mol
@@ -232,28 +222,12 @@ def _load_simulation_dataset(mol, train_ratio, val_ratio, cg_map, model_type):
             val_ratio=val_ratio,
             cached_dataset_path=cached_path,
         )
-        return mol, data_obj, 1, False
-
-    uncapped = {
-        "1UBQ": dataset.UBQ1_Dataset,
-        "1IFC": dataset.IFC1_Dataset,
-        "1MJC": dataset.MJC1_Dataset,
-        "1QX5": dataset.QX5_1_Dataset,
-        "6LYT": dataset.LYT6_Dataset,
-    }
-    if mol in uncapped:
-        data_obj = uncapped[mol](
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
-            shuffle=False,
-        )
-        return mol, data_obj, 1, True
+        return mol, data_obj, 1
 
     raise ValueError(
         "Invalid molecule. Use 'capped_ala', 'capped_ala2', 'capped_ala15', "
         "'hexane', 'benzene_crystal', 'tip3p', 'tip3p-water', 'capped_pro', 'capped_thr', 'capped_gly', "
-        "'benzene_crystal_288', '1UBQ', '1IFC', "
-        "'1MJC', '1QX5', '6LYT', 'CATH', 'cath_full', 'cath_quarter', or 'cath_test'."
+        "'benzene_crystal_288', 'CATH', 'cath_full', 'cath_quarter', or 'cath_test'."
     )
 
 
@@ -261,7 +235,6 @@ def _load_simulation_dataset(mol, train_ratio, val_ratio, cg_map, model_type):
     config["sim_mol"],
     data,
     config["nmol"],
-    _force_single_chain,
 ) = _load_simulation_dataset(
     mol=config["sim_mol"],
     train_ratio=MACE_CONFIG["train_ratio"],
@@ -269,10 +242,6 @@ def _load_simulation_dataset(mol, train_ratio, val_ratio, cg_map, model_type):
     cg_map=MACE_CONFIG.get("CG_map"),
     model_type=MACE_CONFIG.get("type"),
 )
-
-if _force_single_chain:
-    # Uncapped-protein workflows are single-chain only.
-    config["n_chains"] = 1
 
 # AT
 if MACE_CONFIG["type"] == "AT":
@@ -291,26 +260,6 @@ elif MACE_CONFIG["type"] == "CG":
     n_species = data.n_cg_species
 else:
     raise ValueError("Invalid simulation type. Use 'AT' or 'CG'.")
-
-_is_cath_like_model = (
-    "cath" in model_path.lower() or "spice" in model_path.lower() or "fm" in model_path.lower()
-)
-_cg_map = MACE_CONFIG.get("CG_map")
-
-# LEGACY SUPPORT
-# Historical species remapping for CATH-like checkpoints is only valid for
-# coreBetaMap2. For other CG maps (e.g. martini3), keep dataset-derived species.
-if _is_cath_like_model and _cg_map == "coreBetaMap2" and config["sim_mol"] == "capped_ala":
-    species = jnp.array([1, 24, 22, 9, 23, 2])  # C-ACE, N-ALA, CA, CB, C-ALA, N-NME
-
-if _is_cath_like_model and _cg_map == "coreBetaMap2" and config["sim_mol"] == "capped_thr":
-    species = jnp.array([1, 24, 22, 4, 23, 2])  # C-ACE, N-ALA, CA, CB, C-ALA, N-NME
-
-if _is_cath_like_model and _cg_map == "coreBetaMap2" and config["sim_mol"] == "capped_pro":
-    species = jnp.array([1, 24, 14, 22, 23, 2])  # C-ACE, N-PRO, CB, CA, C-PRO, N-NME
-
-if _is_cath_like_model and _cg_map == "coreBetaMap2" and config["sim_mol"] == "capped_ala15":
-    species = jnp.array([1] + [24, 22, 9, 23] * 15 + [2])  # C-ACE, N-PRO, CB, CA, C-PRO, N-NME
 
 print(f"[SPECIES]: {species}")
 
