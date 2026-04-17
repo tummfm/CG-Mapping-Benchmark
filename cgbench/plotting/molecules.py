@@ -43,60 +43,45 @@ def plot_hexane_angle(
     disp_fn: callable,
 ) -> None:
     """
-    Plot KDE of bond angles across all hexane molecules.
+    Plot bond angle distributions across all hexane molecules.
 
-    Calculates angle values for each frame and molecule, then produces two
-    density plots: full range [0, π] and zoomed [1.6, π].
+    Produces two panels in one figure: full range [0°, 180°] and zoomed
+    [~92°, 180°] (equivalent to the old [1.6, π] radians window).
     """
     angle_fn = init_angle_fn(disp_fn, angle_indices_all)
-    angles_ref = angle_fn(ref_coords)
-    angles_traj = angle_fn(traj_coords)
-    ref_flat = np.radians(np.concatenate(angles_ref))
-    traj_flat = np.radians(np.concatenate(angles_traj))
-    ref_clean = ref_flat[np.isfinite(ref_flat)]
-    traj_clean = traj_flat[np.isfinite(traj_flat)]
+    # init_angle_fn returns degrees; flatten all molecules and frames
+    ref_flat = np.concatenate(np.asarray(angle_fn(ref_coords)))
+    traj_flat = np.concatenate(np.asarray(angle_fn(traj_coords)))
+    ref_flat = ref_flat[np.isfinite(ref_flat)]
+    traj_flat = traj_flat[np.isfinite(traj_flat)]
 
-    # Full-range KDE
-    fig1, ax1 = plt.subplots(figsize=(8, 6))
-    if traj_clean.size > 1:
-        kde_t = gaussian_kde(traj_clean)
-        xs = np.linspace(traj_clean.min(), traj_clean.max(), 1000)
-        ax1.plot(xs, kde_t(xs), label="Trajectory KDE")
-    if ref_clean.size > 1:
-        kde_r = gaussian_kde(ref_clean)
-        xsr = np.linspace(
-            min(ref_clean.min(), traj_clean.min()),
-            max(ref_clean.max(), traj_clean.max()),
-            1000,
-        )
-        ax1.plot(xsr, kde_r(xsr), "--", label="Reference KDE")
-    ax1.set_xlim(0, np.pi)
-    ax1.set_xlabel("Angle (radians)")
-    ax1.set_ylabel("Probability Density")
-    ax1.set_title("Bond Angle KDE: Trajectory vs Reference (Full Range)")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    plt.tight_layout()
-    fig1.savefig(os.path.join(outpath, "bond_angles_density.png"), dpi=300)
-    plt.close(fig1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Zoomed KDE
-    fig2, ax2 = plt.subplots(figsize=(8, 6))
-    if traj_clean.size > 1:
-        kde_t = gaussian_kde(traj_clean)
-        ax2.plot(xs, kde_t(xs), label="Trajectory KDE")
-    if ref_clean.size > 1:
-        kde_r = gaussian_kde(ref_clean)
-        ax2.plot(xsr, kde_r(xsr), "--", label="Reference KDE")
-    ax2.set_xlim(1.6, np.pi)
-    ax2.set_xlabel("Angle (radians)")
-    ax2.set_ylabel("Probability Density")
-    ax2.set_title("Bond Angle KDE: Trajectory vs Reference (Zoomed: 1.6 to π)")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    # Full range
+    plot_1d_angle(
+        ax1,
+        [ref_flat, traj_flat],
+        ["Reference", "Trajectory"],
+        degrees=False,  # already in degrees
+        xlabel="$\\Theta$ (deg)",
+    )
+    ax1.set_xlim(0, 180)
+    ax1.set_title("Bond Angle (full range)")
+
+    # Zoomed (~92°–180°, matching old 1.6–π rad window)
+    plot_1d_angle(
+        ax2,
+        [ref_flat, traj_flat],
+        ["Reference", "Trajectory"],
+        degrees=False,
+        xlabel="$\\Theta$ (deg)",
+    )
+    ax2.set_xlim(np.degrees(1.6), 180)
+    ax2.set_title("Bond Angle (zoomed)")
+
     plt.tight_layout()
-    fig2.savefig(os.path.join(outpath, "bond_angles_density_zoomed.png"), dpi=300)
-    plt.close(fig2)
+    fig.savefig(os.path.join(outpath, "bond_angles_density.png"), dpi=300)
+    plt.close(fig)
 
 
 def plot_hex_dihedral(
@@ -116,7 +101,9 @@ def plot_hex_dihedral(
     CG_angles = np.concatenate(hex_fn(traj_coords))
     AT_angles = np.concatenate(hex_fn(ref_coords))
     fig, ax = plt.subplots(1, 1, figsize=(8, 4))
-    plot_1d_dihedral(ax, [AT_angles, CG_angles], ["AT", "Simulation"], bins=60, degrees=True)
+    plot_1d_dihedral(
+        ax, [AT_angles, CG_angles], ["AT", "Simulation"], bins=60, degrees=True
+    )
     ax.set_title("Dihedral angle (all molecules)")
     plt.tight_layout()
     fig.savefig(os.path.join(outpath, "dihedral_angle.png"), dpi=300)
@@ -131,8 +118,12 @@ def plot_hexane_two_site_bond_distribution(
     outpath: str,
 ) -> None:
     """Plot two-site hexane bond-length distribution (reference vs simulation)."""
-    ref_dists = [compute_atom_distance(ref_coords, i, j, disp_fn) for i, j in bond_indices_all]
-    traj_dists = [compute_atom_distance(traj_coords, i, j, disp_fn) for i, j in bond_indices_all]
+    ref_dists = [
+        compute_atom_distance(ref_coords, i, j, disp_fn) for i, j in bond_indices_all
+    ]
+    traj_dists = [
+        compute_atom_distance(traj_coords, i, j, disp_fn) for i, j in bond_indices_all
+    ]
 
     ref_flat = np.concatenate(ref_dists)
     traj_flat = np.concatenate(traj_dists)
@@ -333,10 +324,15 @@ def vis_capped_ala(
         _plot_martini3_capped_angles(
             [(0, 1, 2), (0, 1, 3), (2, 1, 3)],
             ["ACE-BB-SC1", "ACE-BB-NME", "SC1-BB-NME"],
-            ref_coords, traj_coords, disp_fn, outpath,
+            ref_coords,
+            traj_coords,
+            disp_fn,
+            outpath,
         )
     else:
-        plot_ramachandran(AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath)
+        plot_ramachandran(
+            AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath
+        )
 
 
 def vis_hexane(
@@ -396,8 +392,10 @@ def vis_hexane(
     else:
         definitions = {
             "two-site": ([(0, 1)], 2, None, None),
+            "two-site-noh": ([(0, 1)], 2, None, None),
             "two-site-Map2": ([(0, 1)], 2, None, None),
             "three-site": ([(0, 1), (1, 2)], 3, [(0, 1, 2)], None),
+            "three-site-noh": ([(0, 1), (1, 2)], 3, [(0, 1, 2)], None),
             "three-site-Map1": ([(0, 1), (1, 2)], 3, [(0, 1, 2)], None),
             "four-site": ([(0, 1), (1, 2), (2, 3)], 4, None, [0, 1, 2, 3]),
             "six-site": ([(1, 2), (2, 3), (3, 4)], 6, None, [1, 2, 3, 4]),
@@ -431,7 +429,9 @@ def vis_hexane(
                 for k, v in aux.items()
                 if isinstance(v, (np.ndarray, list))
             }
-            print(f"Energy exceeded 10^4 at frame {first_explosion}, truncating trajectory.")
+            print(
+                f"Energy exceeded 10^4 at frame {first_explosion}, truncating trajectory."
+            )
 
     CC_all = []
     Dihedrals_idcs_all = []
@@ -488,7 +488,7 @@ def vis_hexane(
             ref_coords, traj_coords, disp_fn, CC_all, outpath
         )
 
-    elif cg_map == "three-site":
+    elif "three-site" in cg_map:
         plot_hexane_angle(Angles_idcs_all, ref_coords, traj_coords, outpath, disp_fn)
         plot_bond_angle_correlation(
             ref_coords, traj_coords, Angles_idcs_all, CC_all, disp_fn, outpath
@@ -579,10 +579,7 @@ def plot_helicity_gyration_ala15(
 
     # Determine common free energy scale
     scale = determine_free_energy_scale(
-        [ref_rg, traj_rg],
-        [ref_helicity, traj_helicity],
-        300.0 * quantity.kb,
-        bins=200
+        [ref_rg, traj_rg], [ref_helicity, traj_helicity], 300.0 * quantity.kb, bins=200
     )
 
     # Reference
@@ -633,7 +630,7 @@ def plot_helicity_gyration_ala15(
         [ref_handedness, traj_handedness],
         [ref_helicity, traj_helicity],
         300.0 * quantity.kb,
-        bins=200
+        bins=200,
     )
 
     # Reference
@@ -653,7 +650,7 @@ def plot_helicity_gyration_ala15(
         bins=200,
         title="Reference",
     )
-    ax1.axvline(0, color='k', linestyle='--', linewidth=1)
+    ax1.axvline(0, color="k", linestyle="--", linewidth=1)
 
     # Simulation
     plot_histogram_free_energy(
@@ -673,7 +670,7 @@ def plot_helicity_gyration_ala15(
         title=name,
         legend=True,
     )
-    ax2.axvline(0, color='k', linestyle='--', linewidth=1)
+    ax2.axvline(0, color="k", linestyle="--", linewidth=1)
 
     plt.tight_layout()
     fig.savefig(os.path.join(outpath, "handedness_vs_helicity.png"), dpi=300)
@@ -811,7 +808,23 @@ def vis_capped_ala15(
                 "phi_indices": [4, 5, 6, 8],
                 "psi_indices": [5, 6, 8, 9],
                 "pairs": [(4, 5), (5, 6), (6, 8)],
-                "ca_indices": [2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50, 54, 58],
+                "ca_indices": [
+                    2,
+                    6,
+                    10,
+                    14,
+                    18,
+                    22,
+                    26,
+                    30,
+                    34,
+                    38,
+                    42,
+                    46,
+                    50,
+                    54,
+                    58,
+                ],
             },
             # martini3: 32 beads — ACE(0), then [BB_i(1+2i), SC1_i(2+2i)] x15, NME(31)
             # BB beads at indices 1,3,5,...,29; use them as the "CA" proxy for helicity
@@ -823,7 +836,9 @@ def vis_capped_ala15(
             },
         }
         if cg_map not in maps:
-            raise ValueError(f"Unknown cg_map: {cg_map}. Available options: {list(maps.keys())}")
+            raise ValueError(
+                f"Unknown cg_map: {cg_map}. Available options: {list(maps.keys())}"
+            )
 
         mapping = maps[cg_map]
         phi_indices = mapping["phi_indices"]
@@ -922,10 +937,15 @@ def vis_capped_pro(
         _plot_martini3_capped_angles(
             [(0, 1, 2), (0, 1, 3), (2, 1, 3)],
             ["ACE-BB-SC1", "ACE-BB-NME", "SC1-BB-NME"],
-            ref_coords, traj_coords, disp_fn, outpath,
+            ref_coords,
+            traj_coords,
+            disp_fn,
+            outpath,
         )
     else:
-        plot_ramachandran(AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath)
+        plot_ramachandran(
+            AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath
+        )
 
 
 def vis_capped_gly(
@@ -983,13 +1003,18 @@ def vis_capped_gly(
         AT_phi, AT_psi = ala2_dihedral_fn(ref_coords)
         Traj_phi, Traj_psi = ala2_dihedral_fn(traj_coords)
         plot_dihedrals(AT_phi, AT_psi, Traj_phi, Traj_psi, outpath, line_locs)
-        plot_ramachandran(AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath)
+        plot_ramachandran(
+            AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath
+        )
     elif cg_map == "martini3":
         # Gly2 martini3: only backbone angle ACE-BB-NME
         _plot_martini3_capped_angles(
             [(0, 1, 2)],
             ["ACE-BB-NME"],
-            ref_coords, traj_coords, disp_fn, outpath,
+            ref_coords,
+            traj_coords,
+            disp_fn,
+            outpath,
         )
 
 
@@ -1055,10 +1080,15 @@ def vis_capped_thr(
         _plot_martini3_capped_angles(
             [(0, 1, 2), (0, 1, 3), (2, 1, 3)],
             ["ACE-BB-SC1", "ACE-BB-NME", "SC1-BB-NME"],
-            ref_coords, traj_coords, disp_fn, outpath,
+            ref_coords,
+            traj_coords,
+            disp_fn,
+            outpath,
         )
     else:
-        plot_ramachandran(AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath)
+        plot_ramachandran(
+            AT_phi, AT_psi, Traj_phi, Traj_psi, 300.0 * quantity.kb, outpath
+        )
 
 
 def _compute_rmsd_to_ref0(
@@ -1115,11 +1145,17 @@ def _plot_ca_rmsd_and_pair_distances(
     fig.savefig(os.path.join(outpath, "ca_rmsd_ref0.png"), dpi=300)
     plt.close(fig)
 
-    ref_dists = [compute_atom_distance(ref_coords, i, j, disp_fn) for i, j in pair_indices]
-    traj_dists = [compute_atom_distance(traj_coords, i, j, disp_fn) for i, j in pair_indices]
+    ref_dists = [
+        compute_atom_distance(ref_coords, i, j, disp_fn) for i, j in pair_indices
+    ]
+    traj_dists = [
+        compute_atom_distance(traj_coords, i, j, disp_fn) for i, j in pair_indices
+    ]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    for k, (pair, d_ref, d_traj) in enumerate(zip(pair_indices, ref_dists, traj_dists), 1):
+    for k, (pair, d_ref, d_traj) in enumerate(
+        zip(pair_indices, ref_dists, traj_dists), 1
+    ):
         ax.plot(d_ref, label=f"Ref d{k} {pair}", alpha=0.9)
         ax.plot(d_traj, label=f"{name} d{k} {pair}", alpha=0.9, linestyle="--")
     for loc in line_locs:
@@ -1153,9 +1189,11 @@ def vis_staticframe_protein(
     # For CA map each residue contributes one bead, so all indices are CA beads.
     n_sites = min(ref_coords.shape[1], traj_coords.shape[1])
     ca_indices = list(range(n_sites))
-    pair_indices = [(0, 1), (1, 2), (2, 3)] if n_sites >= 4 else [
-        (i, i + 1) for i in range(max(0, min(3, n_sites - 1)))
-    ]
+    pair_indices = (
+        [(0, 1), (1, 2), (2, 3)]
+        if n_sites >= 4
+        else [(i, i + 1) for i in range(max(0, min(3, n_sites - 1)))]
+    )
 
     plot_energy_and_kT(aux, line_locs, outpath)
     _plot_ca_rmsd_and_pair_distances(
@@ -1182,7 +1220,9 @@ def vis_tip3p_water(
     print(f"Visualizing {name} trajectory at {traj_path}")
 
     if type != "CG":
-        raise ValueError("TIP3P-water visualisation currently supports CG trajectories only.")
+        raise ValueError(
+            "TIP3P-water visualisation currently supports CG trajectories only."
+        )
 
     box = dataset.box
     outpath = prepare_output_dir(traj_path)
@@ -1193,7 +1233,9 @@ def vis_tip3p_water(
 
     traj_coords = np.asarray(traj_coords)
     if traj_coords.ndim == 4:
-        traj_coords = traj_coords.reshape(-1, traj_coords.shape[-2], traj_coords.shape[-1])
+        traj_coords = traj_coords.reshape(
+            -1, traj_coords.shape[-2], traj_coords.shape[-1]
+        )
 
     box_arr = np.asarray(box)
     box_len = float(box_arr[0, 0]) if box_arr.ndim == 2 else float(box_arr[0])
@@ -1206,10 +1248,14 @@ def vis_tip3p_water(
         splits = ["training", "validation"]
         if "testing" in dataset.cg_dataset_U:
             splits.append("testing")
-        ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+        ref_coords = np.concatenate(
+            [dataset.cg_dataset_U[s]["R"] for s in splits], axis=0
+        )
         ref_coords = np.asarray(ref_coords)
         if ref_coords.ndim == 4:
-            ref_coords = ref_coords.reshape(-1, ref_coords.shape[-2], ref_coords.shape[-1])
+            ref_coords = ref_coords.reshape(
+                -1, ref_coords.shape[-2], ref_coords.shape[-1]
+            )
 
         ref_max_frames = 20000
         traj_max_frames = 20000
@@ -1259,7 +1305,9 @@ def vis_benzene_crystal(
     print(f"Visualizing {name} trajectory at {traj_path}")
 
     if type != "CG":
-        raise ValueError("Benzene crystal visualisation currently supports CG trajectories only.")
+        raise ValueError(
+            "Benzene crystal visualisation currently supports CG trajectories only."
+        )
 
     box = dataset.box
     outpath = prepare_output_dir(traj_path)
@@ -1275,15 +1323,25 @@ def vis_benzene_crystal(
     # Flatten potential (n_chains, n_frames, n_atoms, 3) trajectories to frame-major 3D arrays.
     traj_coords = np.asarray(traj_coords)
     if traj_coords.ndim == 4:
-        traj_coords = traj_coords.reshape(-1, traj_coords.shape[-2], traj_coords.shape[-1])
+        traj_coords = traj_coords.reshape(
+            -1, traj_coords.shape[-2], traj_coords.shape[-1]
+        )
 
     ref_coords = np.asarray(ref_coords)
     if ref_coords.ndim == 4:
         ref_coords = ref_coords.reshape(-1, ref_coords.shape[-2], ref_coords.shape[-1])
 
     sites_per_mol = 3
-    nmol_cfg = int(config.get("nmol", min(ref_coords.shape[1], traj_coords.shape[1]) // sites_per_mol))
-    nmol = min(nmol_cfg, ref_coords.shape[1] // sites_per_mol, traj_coords.shape[1] // sites_per_mol)
+    nmol_cfg = int(
+        config.get(
+            "nmol", min(ref_coords.shape[1], traj_coords.shape[1]) // sites_per_mol
+        )
+    )
+    nmol = min(
+        nmol_cfg,
+        ref_coords.shape[1] // sites_per_mol,
+        traj_coords.shape[1] // sites_per_mol,
+    )
     n_sites = nmol * sites_per_mol
 
     ref_coords = ref_coords[:, :n_sites, :]
@@ -1295,8 +1353,14 @@ def vis_benzene_crystal(
         off = m * sites_per_mol
         pairs_11.extend([(off, off + 1), (off + 1, off + 2), (off, off + 2)])
 
-    ref_dists = [np.asarray(compute_atom_distance(ref_coords, i, j, disp_fn)) for i, j in pairs_11]
-    traj_dists = [np.asarray(compute_atom_distance(traj_coords, i, j, disp_fn)) for i, j in pairs_11]
+    ref_dists = [
+        np.asarray(compute_atom_distance(ref_coords, i, j, disp_fn))
+        for i, j in pairs_11
+    ]
+    traj_dists = [
+        np.asarray(compute_atom_distance(traj_coords, i, j, disp_fn))
+        for i, j in pairs_11
+    ]
 
     plot_energy_and_kT(aux, line_locs, outpath)
 
@@ -1433,6 +1497,156 @@ def vis_benzene_crystal(
             legend_loc="upper right",
             save_pdf=True,
         )
+
+
+def vis_azobenzene(
+    traj_path,
+    config,
+    type="CG",
+    name="Simulation",
+    dataset=None,
+    cg_map="LVC=0.45",
+):
+    """Visualize azobenzene trajectory (LVC=0.45 mapping).
+
+    Plots:
+    - Energy / kT timeseries
+    - 1D bond distribution for d1: N1 (bead 0) ↔ C7 (bead 5)
+    - 1D bond distribution for d2: N2 (bead 1) ↔ C1 (bead 2)
+    - 1D dihedral distribution for C1-N2-N1-C7 (beads [2, 1, 0, 5])
+    """
+    print(f"Visualizing {name} trajectory at {traj_path}")
+
+    box = dataset.box
+    outpath = prepare_output_dir(traj_path)
+    line_locs = compute_line_locations(config)
+
+    traj_coords, aux = load_trajectory(traj_path)
+    disp_fn, _ = periodic_displacement(box, True)
+
+    plot_energy_and_kT(aux, line_locs, outpath)
+
+    splits = ["training", "validation"]
+    if "testing" in dataset.cg_dataset_U:
+        splits.append("testing")
+    ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+
+    # Bond distributions
+    bond_pairs = [(0, 5), (1, 2)]
+    bond_labels = ["d1 (N1-C7)", "d2 (N2-C1)"]
+
+    for (i, j), label in zip(bond_pairs, bond_labels):
+        ref_dists = compute_atom_distance(ref_coords, i, j, disp_fn)
+        traj_dists = compute_atom_distance(traj_coords, i, j, disp_fn)
+
+        ref_dists = ref_dists[np.isfinite(ref_dists)]
+        traj_dists = traj_dists[np.isfinite(traj_dists)]
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        plot_1d_bond(
+            ax,
+            [ref_dists, traj_dists],
+            ["Reference", name],
+            bins=120,
+            xlabel="Bond length (nm)",
+            mode="single",
+        )
+        ax.set_title(f"Azobenzene bond distribution: {label}")
+        plt.tight_layout()
+        safe_label = label.split(" ")[0].lower()
+        fig.savefig(os.path.join(outpath, f"azobenzene_bond_{safe_label}.png"), dpi=300)
+        plt.close(fig)
+
+    # Dihedral distribution: C1(2)-N2(1)-N1(0)-C7(5)
+    dihedral_indices = [2, 1, 0, 5]
+    dihedral_fn = init_dihedral_fn(disp_fn, [dihedral_indices])
+    ref_dih = np.asarray(dihedral_fn(ref_coords)).ravel()
+    traj_dih = np.asarray(dihedral_fn(traj_coords)).ravel()
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    plot_1d_dihedral(
+        ax, [ref_dih, traj_dih], ["Reference", name], bins=60, degrees=True
+    )
+    ax.set_title("Azobenzene dihedral: C1-N2-N1-C7")
+    plt.tight_layout()
+    fig.savefig(os.path.join(outpath, "azobenzene_dihedral_C1N2N1C7.png"), dpi=300)
+    plt.close(fig)
+
+
+def vis_3bpa(
+    traj_path,
+    config,
+    type="CG",
+    name="Simulation",
+    dataset=None,
+    cg_map="LVC=0.6",
+):
+    """Visualize 3BPA trajectory.
+
+    Plots energy/kT timeseries plus 1D bond-length distributions for the two
+    marked inter-bead distances in the LVC=0.6 mapping:
+
+    - d1: O bead (2) ↔ C5 bead (5)
+    - d2: C3 bead (1) ↔ N bead (3)
+    """
+    print(f"Visualizing {name} trajectory at {traj_path}")
+
+    box = dataset.box
+    outpath = prepare_output_dir(traj_path)
+    line_locs = compute_line_locations(config)
+
+    traj_coords, aux = load_trajectory(traj_path)
+    disp_fn, _ = periodic_displacement(box, True)
+
+    plot_energy_and_kT(aux, line_locs, outpath)
+
+    # Reference coordinates from CG dataset splits
+    splits = ["training", "validation"]
+    if "testing" in dataset.cg_dataset_U:
+        splits.append("testing")
+    ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+
+    # d1: O (bead 2) <-> C5 (bead 5)
+    # d2: C3 (bead 1) <-> N (bead 3)
+    bond_pairs = [(4, 5), (1, 3)]
+    bond_labels = ["d1 (C1-O)", "d2 (C7-N)"]
+
+    for (i, j), label in zip(bond_pairs, bond_labels):
+        ref_dists = compute_atom_distance(ref_coords, i, j, disp_fn)
+        traj_dists = compute_atom_distance(traj_coords, i, j, disp_fn)
+
+        ref_dists = ref_dists[np.isfinite(ref_dists)]
+        traj_dists = traj_dists[np.isfinite(traj_dists)]
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        plot_1d_bond(
+            ax,
+            [ref_dists, traj_dists],
+            ["Reference", name],
+            bins=120,
+            xlabel="Bond length (nm)",
+            mode="single",
+        )
+        ax.set_title(f"3BPA bond distribution: {label}")
+        plt.tight_layout()
+        safe_label = label.split(" ")[0].lower()
+        fig.savefig(os.path.join(outpath, f"3bpa_bond_{safe_label}.png"), dpi=300)
+        plt.close(fig)
+
+    # Dihedral distribution: C1(2)-N2(1)-N1(0)-C7(5)
+    dihedral_indices = [2, 1, 0, 5]
+    dihedral_fn = init_dihedral_fn(disp_fn, [dihedral_indices])
+    ref_dih = np.asarray(dihedral_fn(ref_coords)).ravel()
+    traj_dih = np.asarray(dihedral_fn(traj_coords)).ravel()
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    plot_1d_dihedral(
+        ax, [ref_dih, traj_dih], ["Reference", name], bins=60, degrees=True
+    )
+    ax.set_title("3BPA dihedral: C1-N2-N1-C7")
+    plt.tight_layout()
+    fig.savefig(os.path.join(outpath, "3bpa_dihedral_C1N2N1C7.png"), dpi=300)
+    plt.close(fig)
 
 
 # Backward-compatible aliases for older call sites.

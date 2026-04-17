@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 # Core map_dataset
 # ---------------------------------------------------------------------------
 
+
 def map_dataset(
     position_dataset, displacement_fn, shift_fn, c_map, d_map=None, force_dataset=None
 ):
@@ -83,8 +84,11 @@ atomic_number_map_reverse = {"H": 1, "C": 6, "N": 7, "O": 8, "S": 16}
 # residue_maps.json loading
 # ---------------------------------------------------------------------------
 
+
 def _default_residue_maps_path() -> str:
-    return os.path.join(os.path.dirname(__file__), "..", "..", "data", "residue_maps.json")
+    return os.path.join(
+        os.path.dirname(__file__), "..", "..", "data", "residue_maps.json"
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -96,6 +100,7 @@ def _load_residue_maps_json() -> dict:
 # ---------------------------------------------------------------------------
 # Mapping weight computation
 # ---------------------------------------------------------------------------
+
 
 @jax.jit
 def get_map_weights(
@@ -126,6 +131,7 @@ def get_map_weights(
 # ---------------------------------------------------------------------------
 # CG topology helpers
 # ---------------------------------------------------------------------------
+
 
 def _derive_cg_topology(
     bond_0_pairs: list[list[int]],
@@ -159,7 +165,9 @@ def _derive_cg_topology(
             for b in range(a + 1, len(nbrs)):
                 angles.append([nbrs[a], j, nbrs[b]])
     angle_arr = (
-        np.array(angles, dtype=np.int32).T if angles else np.zeros((3, 0), dtype=np.int32)
+        np.array(angles, dtype=np.int32).T
+        if angles
+        else np.zeros((3, 0), dtype=np.int32)
     )
 
     # Dihedrals: extend each bond i-j to i_ext-i-j-j_ext
@@ -200,16 +208,26 @@ def _tile_topology(
         off = m * n_sites_per_mol
         bonds.extend([[i + off, j + off] for i, j in single_bonds])
         angles.extend([[i + off, j + off, k + off] for i, j, k in single_angles])
-        dihedrals.extend([[i + off, j + off, k + off, l + off] for i, j, k, l in single_dihedrals])
+        dihedrals.extend(
+            [[i + off, j + off, k + off, l + off] for i, j, k, l in single_dihedrals]
+        )
 
     def _arr(lst, ncols):
-        return np.array(lst, dtype=np.int32).T if lst else np.zeros((ncols, 0), dtype=np.int32)
+        return (
+            np.array(lst, dtype=np.int32).T
+            if lst
+            else np.zeros((ncols, 0), dtype=np.int32)
+        )
 
     return _arr(bonds, 2), _arr(angles, 3), _arr(dihedrals, 4)
 
 
 def _arr_topology(terms: list[list[int]], ncols: int) -> np.ndarray:
-    return np.array(terms, dtype=np.int32).T if terms else np.zeros((ncols, 0), dtype=np.int32)
+    return (
+        np.array(terms, dtype=np.int32).T
+        if terms
+        else np.zeros((ncols, 0), dtype=np.int32)
+    )
 
 
 def _atomistic_angles_from_bonds(at_bonds: list[tuple[int, int]]) -> list[list[int]]:
@@ -299,7 +317,11 @@ def _slice_cg_topology_from_atomistic(
     cg_angles = _project_atomistic_terms_to_cg(at_angles, mapping_indices)
     cg_dihedrals = _project_atomistic_terms_to_cg(at_dihedrals, mapping_indices)
 
-    return _arr_topology(cg_bonds, 2), _arr_topology(cg_angles, 3), _arr_topology(cg_dihedrals, 4)
+    return (
+        _arr_topology(cg_bonds, 2),
+        _arr_topology(cg_angles, 3),
+        _arr_topology(cg_dihedrals, 4),
+    )
 
 
 def _compute_bond_types_from_cg_bond_index(
@@ -383,12 +405,17 @@ def _build_explicit_residue_topology(
             shifted.append([v + cg_offset for v in vals])
         return shifted
 
-    return _shift_terms("bonds", 2), _shift_terms("angles", 3), _shift_terms("dihedrals", 4)
+    return (
+        _shift_terms("bonds", 2),
+        _shift_terms("angles", 3),
+        _shift_terms("dihedrals", 4),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Hexane_Map
 # ---------------------------------------------------------------------------
+
 
 class Hexane_Map:
     """CG mapping for liquid hexane (multi-molecule system).
@@ -401,22 +428,49 @@ class Hexane_Map:
     """
 
     _base_species = [
-        "C", "H", "H", "H",   # CH3
-        "C", "H", "H",         # CH2
-        "C", "H", "H",         # CH2
-        "C", "H", "H",         # CH2
-        "C", "H", "H",         # CH2
-        "C", "H", "H", "H",   # CH3
+        "C",
+        "H",
+        "H",
+        "H",  # CH3
+        "C",
+        "H",
+        "H",  # CH2
+        "C",
+        "H",
+        "H",  # CH2
+        "C",
+        "H",
+        "H",  # CH2
+        "C",
+        "H",
+        "H",  # CH2
+        "C",
+        "H",
+        "H",
+        "H",  # CH3
     ]
 
     # Atomistic bonds for a single hexane (20 atoms, 0-indexed)
     _at_bonds_single: list[tuple[int, int]] = [
-        (0, 1), (0, 2), (0, 3), (0, 4),
-        (4, 5), (4, 6), (4, 7),
-        (7, 8), (7, 9), (7, 10),
-        (10, 11), (10, 12), (10, 13),
-        (13, 14), (13, 15), (13, 16),
-        (16, 17), (16, 18), (16, 19),
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (4, 5),
+        (4, 6),
+        (4, 7),
+        (7, 8),
+        (7, 9),
+        (7, 10),
+        (10, 11),
+        (10, 12),
+        (10, 13),
+        (13, 14),
+        (13, 15),
+        (13, 16),
+        (16, 17),
+        (16, 18),
+        (16, 19),
     ]
 
     # (n_cg_per_mol, single-molecule index pattern, cg_species_single)
@@ -428,7 +482,28 @@ class Hexane_Map:
         ),
         "four-site": (
             4,
-            [-1, -1, -1, -1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, -1, -1, -1, -1],
+            [
+                -1,
+                -1,
+                -1,
+                -1,
+                0,
+                -1,
+                -1,
+                1,
+                -1,
+                -1,
+                2,
+                -1,
+                -1,
+                3,
+                -1,
+                -1,
+                -1,
+                -1,
+                -1,
+                -1,
+            ],
             [1, 2, 2, 1],
         ),
         "three-site": (
@@ -436,15 +511,20 @@ class Hexane_Map:
             [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2],
             [1, 2, 1],
         ),
+        "three-site-noh": (
+            3,
+            [0, -1, -1, -1, 0, -1, -1, 1, -1, -1, 1, -1, -1, 2, -1, -1, 2, -1, -1, -1],
+            [1, 2, 1],
+        ),
         "two-site": (
             2,
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
             [1, 1],
         ),
-        "two-site-Map2": (
+        "two-site-noh": (
             2,
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 2],
+            [0, -1, -1, -1, 0, -1, -1, 0, -1, -1, 1, -1, -1, 1, -1, -1, 1, -1, -1, -1],
+            [1, 1],
         ),
         "A3": (
             2,
@@ -497,7 +577,9 @@ class Hexane_Map:
     def get_map(self, name: str) -> tuple:
         """Return (map_indices, cg_species, cg_masses, weights)."""
         if name not in self._maps:
-            raise ValueError(f"Invalid map '{name}'. Choose one of {self.get_available_maps()}")
+            raise ValueError(
+                f"Invalid map '{name}'. Choose one of {self.get_available_maps()}"
+            )
         data = self._maps[name]
         indices = data["indices"]
         cg_species = data["cg_species"]
@@ -521,9 +603,11 @@ class Hexane_Map:
         d = self._maps[name]
         return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
 
+
 # ---------------------------------------------------------------------------
 # BenzeneCrystal_Map
 # ---------------------------------------------------------------------------
+
 
 class BenzeneCrystal_Map:
     """CG mapping for benzene crystal (multi-molecule system).
@@ -538,8 +622,18 @@ class BenzeneCrystal_Map:
 
     # Single benzene atomistic bonds (12 atoms, 0-indexed)
     _at_bonds_single: list[tuple[int, int]] = [
-        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0),
-        (0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 0),
+        (0, 6),
+        (1, 7),
+        (2, 8),
+        (3, 9),
+        (4, 10),
+        (5, 11),
     ]
 
     # Triangle topology for one molecule
@@ -551,7 +645,7 @@ class BenzeneCrystal_Map:
         self.n_replicas = nmol
         self.at_masses = [mass_map[s] for s in self._base_species] * nmol
 
-        single_indices = [0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2]
+        single_indices = [0, 0, 1, 1, 2, 2, -1, -1, -1, -1, -1, -1]
         indices = self._tile_indices(single_indices, block_size=3)
         cg_species = np.array([1, 1, 1] * nmol, dtype=np.int32)
         cg_bonds, cg_angles, cg_dihedrals = _tile_topology(
@@ -589,7 +683,9 @@ class BenzeneCrystal_Map:
         """Return (map_indices, cg_species, cg_masses, weights)."""
         name = self._normalize_map_name(name)
         if name not in self._maps:
-            raise ValueError(f"Invalid map '{name}'. Choose one of {self.get_available_maps()}")
+            raise ValueError(
+                f"Invalid map '{name}'. Choose one of {self.get_available_maps()}"
+            )
         data = self._maps[name]
         indices = data["indices"]
         cg_species = data["cg_species"]
@@ -613,9 +709,11 @@ class BenzeneCrystal_Map:
         d = self._maps[name]
         return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
 
+
 # ---------------------------------------------------------------------------
 # CappedPeptideMap
 # ---------------------------------------------------------------------------
+
 
 class CappedPeptideMap:
     """CG mapping for ACE/NME-capped peptides using residue_maps.json.
@@ -673,7 +771,9 @@ class CappedPeptideMap:
             c_idx = residue_maps[res_k].get("backbone_C_idx")
             n_idx = residue_maps[res_k1].get("backbone_N_idx")
             if c_idx is not None and n_idx is not None:
-                at_bonds.append((atom_offsets[ri] + c_idx, atom_offsets[ri + 1] + n_idx))
+                at_bonds.append(
+                    (atom_offsets[ri] + c_idx, atom_offsets[ri + 1] + n_idx)
+                )
         self._at_bonds = at_bonds
 
         # Available strategies = intersection across all residues
@@ -754,9 +854,9 @@ class CappedPeptideMap:
         )
         weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
         row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-5), (
-            f"Weights don't sum to 1 (max err {float(jnp.max(jnp.abs(row_sums - 1))):.2e})"
-        )
+        assert jnp.allclose(
+            row_sums, 1.0, atol=1e-5
+        ), f"Weights don't sum to 1 (max err {float(jnp.max(jnp.abs(row_sums - 1))):.2e})"
         return indices, cg_species, cg_masses, weights
 
     def get_cg_topology(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -766,9 +866,11 @@ class CappedPeptideMap:
         d = self._maps[name]
         return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
 
+
 # ---------------------------------------------------------------------------
 # TIP3P_Water_Map
 # ---------------------------------------------------------------------------
+
 
 class TIP3P_Water_Map:
     """CG mapping for TIP3P water: one bead per water molecule, no bonds.
@@ -791,8 +893,8 @@ class TIP3P_Water_Map:
         ua_indices = []
         ha_indices = []
         for m in range(n_mols):
-            ua_indices.extend([m, m, m])       # O, H1, H2 → bead m
-            ha_indices.extend([m, -1, -1])     # O → bead m; H1, H2 excluded
+            ua_indices.extend([m, m, m])  # O, H1, H2 → bead m
+            ha_indices.extend([m, -1, -1])  # O → bead m; H1, H2 excluded
 
         self._maps = {
             "UnitedAtom": {
@@ -817,7 +919,9 @@ class TIP3P_Water_Map:
     def get_map(self, name: str) -> tuple:
         """Return (map_indices, cg_species, cg_masses, weights)."""
         if name not in self._maps:
-            raise ValueError(f"Invalid map '{name}'. Choose one of {self.get_available_maps()}")
+            raise ValueError(
+                f"Invalid map '{name}'. Choose one of {self.get_available_maps()}"
+            )
         data = self._maps[name]
         indices = data["indices"]
         cg_species = data["cg_species"]
@@ -928,6 +1032,7 @@ class CATH_Map:
 
         # Group atoms by (residue_id, residue_name)
         from collections import OrderedDict
+
         residues: "OrderedDict[tuple, list[int]]" = OrderedDict()
         for atom_idx, (res_id, res_name) in enumerate(zip(residue_ids, residue_names)):
             residues.setdefault((res_id, res_name), []).append(atom_idx)
@@ -943,7 +1048,9 @@ class CATH_Map:
         for (res_id, res_name), atom_idxs in residues.items():
             n_res_atoms = len(atom_idxs)
             if res_name not in residue_maps:
-                print(f"  [WARN] residue '{res_name}' not in residue_maps.json - skipped")
+                print(
+                    f"  [WARN] residue '{res_name}' not in residue_maps.json - skipped"
+                )
                 at_masses.extend([12.011] * n_res_atoms)
                 continue
 
@@ -1022,9 +1129,11 @@ class CATH_Map:
 
         # Pre-compute CG topology
         if self.mapping_type == "slice":
-            self._cg_bonds, self._cg_angles, self._cg_dihedrals = _slice_cg_topology_from_atomistic(
-                at_bonds=self._at_bonds,
-                mapping_indices=self._indices,
+            self._cg_bonds, self._cg_angles, self._cg_dihedrals = (
+                _slice_cg_topology_from_atomistic(
+                    at_bonds=self._at_bonds,
+                    mapping_indices=self._indices,
+                )
             )
         else:
             self._cg_bonds = _arr_topology(explicit_bonds, 2)
@@ -1049,12 +1158,238 @@ class CATH_Map:
         )
         weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
         row_sums = jnp.sum(weights, axis=1)
-        assert jnp.allclose(row_sums, 1.0, atol=1e-5), (
-            f"Weights don't sum to 1 (max err {float(jnp.max(jnp.abs(row_sums - 1))):.2e})"
-        )
+        assert jnp.allclose(
+            row_sums, 1.0, atol=1e-5
+        ), f"Weights don't sum to 1 (max err {float(jnp.max(jnp.abs(row_sums - 1))):.2e})"
         return indices, cg_species, cg_masses, weights
 
     def get_cg_topology(self, name: str | None = None) -> tuple:
         """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
         return self._cg_bonds, self._cg_angles, self._cg_dihedrals
 
+
+# ---------------------------------------------------------------------------
+# 3BPA mapping
+# ---------------------------------------------------------------------------
+
+
+class ThreeBPA_Map:
+    """CG mapping for 3-bromopropionic acid (3BPA).
+
+    Available maps:
+    - ``"LVC=0.6"``: LVC-based mapping with cutoff 0.6.
+    """
+
+    def __init__(self):
+        # Placeholder: LVC=0.6
+        self.base_species = [
+            "C",
+            "C",
+            "C",
+            "H",
+            "C",
+            "O",
+            "N",
+            "N",
+            "H",
+            "H",
+            "C",
+            "H",
+            "H",
+            "C",
+            "C",
+            "H",
+            "H",
+            "C",
+            "C",
+            "C",
+            "H",
+            "C",
+            "H",
+            "C",
+            "H",
+            "H",
+            "H",
+        ]
+        self.at_masses = [mass_map[s] for s in self.base_species]
+
+        empty_bonds = np.zeros((2, 0), dtype=np.int32)
+        empty_angles = np.zeros((3, 0), dtype=np.int32)
+        empty_dihedrals = np.zeros((4, 0), dtype=np.int32)
+
+        self._maps = {
+            "LVC=0.6": {
+                "indices": [
+                    0,  # 1BPA      C    1
+                    1,  # 1BPA     C1    2
+                    0,  # 1BPA     C2    3
+                    -1,  # 1BPA      H    4
+                    1,  # 1BPA     C3    5 d2
+                    4,  # 1BPA      O    6  d1
+                    3,  # 1BPA      N    7  d2
+                    2,  # 1BPA     N1    8
+                    -1,  # 1BPA     H1    9
+                    -1,  # 1BPA     H2   10
+                    2,  # 1BPA     C4   11
+                    -1,  # 1BPA     H3   12
+                    -1,  # 1BPA     H4   13
+                    5,  # 1BPA     C5   14  d1
+                    6,  # 1BPA     C6   15
+                    -1,  # 1BPA     H5   16
+                    -1,  # 1BPA     H6   17
+                    7,  # 1BPA     C7   18
+                    6,  # 1BPA     C8   19
+                    7,  # 1BPA     C9   20
+                    -1,  # 1BPA     H7   21
+                    8,  # 1BPA    C10   22
+                    -1,  # 1BPA     H8   23
+                    8,  # 1BPA    C11   24
+                    -1,  # 1BPA     H9   25
+                    -1,  # 1BPA    H10   26
+                    -1,  # 1BPA    H11   27
+                ],
+                "cg_species": [1, 1, 2, 3, 4, 5, 1, 1, 1],
+                "cg_bonds": empty_bonds,
+                "cg_angles": empty_angles,
+                "cg_dihedrals": empty_dihedrals,
+            },
+        }
+
+    def get_available_maps(self) -> list[str]:
+        return list(self._maps)
+
+    def get_map(self, name: str) -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
+        if name not in self._maps:
+            raise ValueError(
+                f"Invalid map '{name}'. Choose one of {self.get_available_maps()}"
+            )
+        data = self._maps[name]
+        indices = data["indices"]
+        cg_species = data["cg_species"]
+        n_cg = len(cg_species)
+
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
+        )
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
+        return indices, cg_species, cg_masses, weights
+
+    def get_cg_topology(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        d = self._maps[name]
+        return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]
+
+
+# ---------------------------------------------------------------------------
+# Azobenzene mapping
+# ---------------------------------------------------------------------------
+
+
+class Azobenzene_Map:
+    """ """
+
+    def __init__(self):
+        self.base_species = [
+            "N",
+            "N",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "C",
+            "H",
+            "H",
+            "H",
+            "H",
+            "H",
+            "H",
+            "H",
+            "H",
+            "H",
+            "H",
+        ]
+        self.at_masses = [mass_map[s] for s in self.base_species]
+
+        empty_bonds = np.zeros((2, 0), dtype=np.int32)
+        empty_angles = np.zeros((3, 0), dtype=np.int32)
+        empty_dihedrals = np.zeros((4, 0), dtype=np.int32)
+
+        self._maps = {
+            "LVC=0.45": {
+                "indices": [
+                    0,  # 1LIG     N1 d1 dihedral1_3
+                    1,  # 1LIG     N2 d2 dihedral1_2
+                    2,  # 1LIG     C1 d2 dihedral1_1
+                    2,  # 1LIG     C2
+                    3,  # 1LIG     C3
+                    3,  # 1LIG     C4
+                    4,  # 1LIG     C5
+                    4,  # 1LIG     C6
+                    5,  # 1LIG     C7 d1 dihedral1_4
+                    5,  # 1LIG     C8
+                    6,  # 1LIG     C9
+                    6,  # 1LIG    C10
+                    7,  # 1LIG     C11
+                    7,  # 1LIG     C12
+                    -1,  # 1LIG     H1
+                    -1,  # 1LIG     H2
+                    -1,  # 1LIG     H3
+                    -1,  # 1LIG     H4
+                    -1,  # 1LIG     H5
+                    -1,  # 1LIG     H6
+                    -1,  # 1LIG     H7
+                    -1,  # 1LIG     H8
+                    -1,  # 1LIG     H9
+                    -1,  # 1LIG    H10
+                ],
+                "cg_species": [1, 1, 2, 2, 2, 2, 2, 2],  # 1 = N, 2 = C-C
+                "cg_bonds": empty_bonds,
+                "cg_angles": empty_angles,
+                "cg_dihedrals": empty_dihedrals,
+            },
+        }
+
+    def get_available_maps(self) -> list[str]:
+        return list(self._maps)
+
+    def get_map(self, name: str) -> tuple:
+        """Return (map_indices, cg_species, cg_masses, weights)."""
+        if name not in self._maps:
+            raise ValueError(
+                f"Invalid map '{name}'. Choose one of {self.get_available_maps()}"
+            )
+        data = self._maps[name]
+        indices = data["indices"]
+        cg_species = data["cg_species"]
+        n_cg = len(cg_species)
+
+        indices_arr = jnp.array(indices, dtype=jnp.int32)
+        at_masses_arr = jnp.array(self.at_masses, dtype=jnp.float32)
+        valid_mask = indices_arr >= 0
+        clipped = jnp.where(valid_mask, indices_arr, 0)
+        cg_masses = jax.ops.segment_sum(
+            jnp.where(valid_mask, at_masses_arr, 0.0), clipped, n_cg
+        )
+        weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
+        return indices, cg_species, cg_masses, weights
+
+    def get_cg_topology(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
+        if name not in self._maps:
+            raise ValueError(f"Invalid map '{name}'.")
+        d = self._maps[name]
+        return d["cg_bonds"], d["cg_angles"], d["cg_dihedrals"]

@@ -10,10 +10,10 @@ MD_DATASET_PATHS = {
         "traj": f"{BASE_DATASET_PATH}/liquid_hexane/md.xtc",
     },
     "benzene_crystal": {
-        "path": f"{BASE_DATASET_PATH}/benzene_crystal_288/benzene_crystal_288.npz",
-        "config": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_elong_nvt_1.gro",
-        "topology": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_prod_1fs.tpr",
-        "traj": f"{BASE_DATASET_PATH}/benzene_crystal_288/crys_prod_1fs.trr", # if no xtc is given, we assume the trr contains both coordinates and forces, and use it for traj as well
+        "path": f"{BASE_DATASET_PATH}/BenzeneCrystal/benzene_crystal.npz",
+        "config": f"{BASE_DATASET_PATH}/BenzeneCrystal/crys_elong_nvt_1.gro",
+        "topology": f"{BASE_DATASET_PATH}/BenzeneCrystal/crys_prod_1fs.tpr",
+        "traj": f"{BASE_DATASET_PATH}/BenzeneCrystal/crys_prod_1fs.trr", # if no xtc is given, we assume the trr contains both coordinates and forces, and use it for traj as well
     },
     "capped_ala": { # also referred to as alanine dipeptide
         "path": f"{BASE_DATASET_PATH}/Capped_L-Ala/l-ala2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
@@ -49,10 +49,10 @@ MD_DATASET_PATHS = {
     },
     "capped_thr": {
         "path": f"{BASE_DATASET_PATH}/Capped_L-Thr/l-thr2_ttot=500ns_dt=0.5fs_nstxout=2000.npz",
-        "config": f"{BASE_DATASET_PATH}/Capped_L-Thr/md_0_1.gro",
+        "config": f"{BASE_DATASET_PATH}/Capped_L-Thr/md.gro",
         "topology": f"{BASE_DATASET_PATH}/Capped_L-Thr/md.tpr",
-        "traj": f"{BASE_DATASET_PATH}/Capped_L-Thr/md_0_1.xtc",
-        "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Thr/md_0_1.trr",
+        "traj": f"{BASE_DATASET_PATH}/Capped_L-Thr/md.xtc",
+        "traj_forces": f"{BASE_DATASET_PATH}/Capped_L-Thr/md.trr",
         "selection": "not resname SOL WAT HOH",
     },
     "capped_gly": {
@@ -88,15 +88,27 @@ MD_DATASET_PATHS = {
     "spice_dipeptides": {
         "path": f"{BASE_DATASET_PATH}/SPICE/spice_dipeptides_coreBetaMap2.npz",
     },
-    "pepsol_dimers": {
-        "path": f"{BASE_DATASET_PATH}/PepSol/pepsol_dimers_coreBetaMap2.npz"
-    },
-    "cath_quarter": {
-        "path": f"{BASE_DATASET_PATH}/CATH/CATH_prot/datasets/quarter/cath.npz"
-    },
     "cath_test": {
         "path": f"{BASE_DATASET_PATH}/cath_10.npz"
-    }
+    },
+    "3bpa": {
+        "path": f"{BASE_DATASET_PATH}/3BPA/3bpa.npz",
+        "config": f"{BASE_DATASET_PATH}/3BPA/bpa_prod_new.gro",
+        "topology": f"{BASE_DATASET_PATH}/3BPA/bpa_prod_new.tpr",
+        "traj": f"{BASE_DATASET_PATH}/3BPA/bpa_prod_new.trr",  # trr contains both coordinates and forces
+    },
+    "3bpa_biased": {
+        "path": f"{BASE_DATASET_PATH}/3BPA_biased/3bpa_biased.npz",
+        "config": f"{BASE_DATASET_PATH}/3BPA_biased/opes_bpa.gro",
+        "topology": f"{BASE_DATASET_PATH}/3BPA_biased/opes_bpa.tpr",
+        "traj": f"{BASE_DATASET_PATH}/3BPA_biased/opes_bpa.trr",  # trr contains both coordinates and forces
+    },
+    "azobenzene_biased": {
+        "path": f"{BASE_DATASET_PATH}/Azobenzene_biased/azobenzene_biased.npz",
+        "config": f"{BASE_DATASET_PATH}/Azobenzene_biased/azo_prod.gro",
+        "topology": f"{BASE_DATASET_PATH}/Azobenzene_biased/opes_azo.tpr",
+        "traj": f"{BASE_DATASET_PATH}/Azobenzene_biased/opes_azo.trr",  # trr contains both coordinates and forces
+    },
 }
 STATIC_FRAME_DATASET_PATHS = {
     "1UBQ": {
@@ -130,10 +142,6 @@ STATIC_FRAME_DATASET_PATHS = {
 def _get_available_datasets():
     return list(MD_DATASET_PATHS.keys())
 
-
-BOND_SPRING_CONSTANTS = {}
-
-
 # Global configurations
 SEED = 22
 
@@ -151,6 +159,17 @@ DEFAULT_MACE_CONFIG = {
 }
 
 DEFAULT_NEQUIP_CONFIG = {
+    "train_ratio": 0.9,
+    "val_ratio": 0.1,
+    "PRNGKey_seed": SEED,
+}
+
+DEFAULT_SPLINE_CONFIG = {
+    "n_knots_nb": 20,
+    "n_knots_bond": 20,
+    "n_knots_angle": 20,
+    "n_knots_dihedral": 20,
+    "r_onset_fraction": 0.9,   # r_onset = r_onset_fraction * r_cutoff
     "train_ratio": 0.9,
     "val_ratio": 0.1,
     "PRNGKey_seed": SEED,
@@ -195,13 +214,12 @@ DEFAULT_RE_CONFIG = {
 DEFAULT_SIM_CONFIG = {
     "gamma": 100.0,  # Friction coefficient in 1/ps (for NVT Langevin)
     "dt_values_fs": [2],  # Add more dt values as needed
-    "print_every": 0.5,  # Save frame every 0.5 ps
+    "print_every": 0.01,  # Save frame every 0.5 ps
     "sim_mode": "sampling",  # simulation mode: 'sampling', 'stability', 'helix', 'speed'
     "ensemble": "NVT",  # NVT or NVE
     # "t_eq": 0,  # Equlibration time in ps
     "t_total": 100,  # Total simulation time in ps (- t_eq)
     "n_chains": 3,  # Number of simulations (parallel)
-    "kT": 300.0 * quantity.kb,  # Temperature in energy units
     "T": 300.0,
     "PRNGKey_seed": SEED,
 }

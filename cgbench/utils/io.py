@@ -54,11 +54,31 @@ def _normalize_symbol(token: str | None) -> str | None:
     return clean if clean else None
 
 
+def _atomic_number_from_name(name: str | None) -> int | None:
+    """Resolve atomic number from atom names like C12, CL1, NA2, C0A.
+
+    The name must start with a known element symbol and may be followed by an
+    alphanumeric suffix (e.g., OPLS-style atom names like C0A, H0M).
+    """
+    token = _normalize_symbol(name)
+    if token is None:
+        return None
+
+    # Try longer symbols first (e.g., CL before C).
+    for symbol in sorted(_ATOMIC_NUMBER_BY_SYMBOL.keys(), key=len, reverse=True):
+        if token.startswith(symbol):
+            suffix = token[len(symbol) :]
+            if suffix == "" or suffix.isalnum():
+                return _ATOMIC_NUMBER_BY_SYMBOL[symbol]
+    return None
+
+
 def atomic_number_from_mda_atom(atom) -> int:
     """Resolve atomic number from MDAnalysis atom metadata.
 
-    This function is strict by design: it only accepts exact element symbols
-    provided by MDAnalysis atom attributes (``type`` or ``element``).
+    This function is strict by design:
+    1) exact symbols from ``type`` or ``element``;
+    2) atom ``name`` patterns like C12, O3, CL1, NA2.
     """
     tokens = [
         _normalize_symbol(getattr(atom, "type", None)),
@@ -68,6 +88,10 @@ def atomic_number_from_mda_atom(atom) -> int:
     for token in tokens:
         if token is not None and token in _ATOMIC_NUMBER_BY_SYMBOL:
             return _ATOMIC_NUMBER_BY_SYMBOL[token]
+
+    name_atomic_number = _atomic_number_from_name(getattr(atom, "name", None))
+    if name_atomic_number is not None:
+        return name_atomic_number
 
     raise ValueError(
         "Could not determine atomic number from MDAnalysis atom metadata. "
@@ -112,7 +136,9 @@ def read_last_gro_box_nm(config_path: str) -> np.ndarray:
         raise ValueError(
             f"Could not parse box from final GRO line in {config_path}: '{lines[-1]}'"
         )
-    return np.array([float(parts[0]), float(parts[1]), float(parts[2])], dtype=np.float32)
+    return np.array(
+        [float(parts[0]), float(parts[1]), float(parts[2])], dtype=np.float32
+    )
 
 
 def load_single_gro_snapshot_dataset(config_path: str) -> dict:
@@ -196,7 +222,12 @@ def _extract_local_bonded_indices(ag) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
     try:
         angles = (
-            _remap([[a.atoms[0].index, a.atoms[1].index, a.atoms[2].index] for a in ag.angles])
+            _remap(
+                [
+                    [a.atoms[0].index, a.atoms[1].index, a.atoms[2].index]
+                    for a in ag.angles
+                ]
+            )
             if len(ag.angles) > 0
             else np.zeros((0, 3), dtype=np.int32)
         )
@@ -207,7 +238,12 @@ def _extract_local_bonded_indices(ag) -> tuple[np.ndarray, np.ndarray, np.ndarra
         dihedrals = (
             _remap(
                 [
-                    [d.atoms[0].index, d.atoms[1].index, d.atoms[2].index, d.atoms[3].index]
+                    [
+                        d.atoms[0].index,
+                        d.atoms[1].index,
+                        d.atoms[2].index,
+                        d.atoms[3].index,
+                    ]
                     for d in ag.dihedrals
                 ]
             )
@@ -260,10 +296,25 @@ def load_tpr_topology_metadata(
             tried_errors.append(str(e))
 
     if u is None:
-        raise ValueError(
-            "Failed to load .tpr topology with MDAnalysis. "
-            f"Errors: {' | '.join(tried_errors)}"
-        )
+        # Fall back to the .gro config file when the .tpr version is unsupported.
+        if (
+            config_path is not None
+            and os.path.splitext(config_path)[1].lower() == ".gro"
+        ):
+            import warnings
+
+            warnings.warn(
+                f"Failed to parse {topology_path} with MDAnalysis "
+                f"({'; '.join(tried_errors)}). "
+                f"Falling back to GRO file {config_path} — bonded topology will be empty.",
+                stacklevel=2,
+            )
+            u = mda.Universe(config_path)
+        else:
+            raise ValueError(
+                "Failed to load .tpr topology with MDAnalysis. "
+                f"Errors: {' | '.join(tried_errors)}"
+            )
 
     ag = u.select_atoms(selection) if selection != "all" else u.atoms
     if len(ag) == 0:
@@ -279,9 +330,7 @@ def load_tpr_topology_metadata(
     elif config_path is not None:
         box = load_single_gro_snapshot_dataset(config_path)["box"][0]
     else:
-        raise ValueError(
-            f"Could not determine simulation box from {topology_path}."
-        )
+        raise ValueError(f"Could not determine simulation box from {topology_path}.")
 
     bonds, angles, dihedrals = _extract_local_bonded_indices(ag)
 
@@ -298,38 +347,111 @@ def load_tpr_topology_metadata(
     }
 
 
-def load_gromacs_to_dataset(
+def load_gromacs_trajectory_with_forces(
     topology_path: str,
-    trajectory_path: str,
-    selection: str = "protein",
+    traj_path: str,
+    traj_forces_path: str | None = None,
+    selection: str = "all",
+    topology_fallback_path: str | None = None,
 ) -> dict:
-    """Load a GROMACS trajectory into the in-project dataset dict format."""
+    """Load a GROMACS trajectory with forces into the dataset dict format.
+
+    Coordinates are read from *traj_path* (.xtc or .trr).
+    Forces are read from *traj_forces_path* when provided; otherwise they are
+    attempted from *traj_path* itself (works when it is a .trr that stores forces).
+
+    Unit conventions (matching the project's existing .npz files):
+      - Positions: nm  (MDAnalysis reports Å, multiplied by 0.1)
+      - Forces:    kJ/(mol·nm)  (MDAnalysis reports kJ/(mol·Å), multiplied by 10)
+      - Box:       nm  (3×3 matrix, diagonal for orthorhombic cells)
+    """
     try:
         import MDAnalysis as mda
     except ImportError as e:
         raise ImportError(
-            "MDAnalysis is required for topology loading. "
+            "MDAnalysis is required for trajectory loading. "
             "Install with `pip install MDAnalysis`."
         ) from e
 
-    u = mda.Universe(topology_path, trajectory_path)
-    atoms = u.select_atoms(selection)
+    fallback_topology_path = topology_fallback_path
+    if fallback_topology_path is None:
+        fallback_topology_path = os.path.splitext(topology_path)[0] + ".gro"
+    if os.path.splitext(topology_path)[1].lower() == ".gro":
+        fallback_topology_path = topology_path
+
+    try:
+        u = mda.Universe(topology_path, traj_path, topology_format="TPR")
+        active_topology_path = topology_path
+    except Exception as tpr_err:
+        if fallback_topology_path is None or not os.path.exists(fallback_topology_path):
+            raise ValueError(
+                f"Failed to load .tpr topology ({tpr_err}) and no valid fallback topology "
+                f"was found (configured fallback: {topology_fallback_path}, "
+                f"derived fallback: {os.path.splitext(topology_path)[0] + '.gro'})."
+            ) from tpr_err
+        import warnings
+
+        warnings.warn(
+            f"Failed to parse {topology_path} as TPR ({tpr_err}). "
+            f"Falling back to topology {fallback_topology_path}.",
+            stacklevel=2,
+        )
+        u = mda.Universe(fallback_topology_path, traj_path)
+        active_topology_path = fallback_topology_path
+
+    atoms = u.select_atoms(selection) if selection != "all" else u.atoms
     n_frames = len(u.trajectory)
     n_atoms = len(atoms)
 
     if n_atoms == 0:
-        raise ValueError(f"Selection '{selection}' returned zero atoms for {topology_path}.")
+        raise ValueError(
+            f"Selection '{selection}' returned zero atoms for {topology_path}."
+        )
 
     coords = np.zeros((n_frames, n_atoms, 3), dtype=np.float32)
     forces = np.zeros((n_frames, n_atoms, 3), dtype=np.float32)
     boxes = np.zeros((n_frames, 3, 3), dtype=np.float32)
 
+    # Pass 1: coordinates (and forces when they live in the same file).
     for fi, ts in enumerate(u.trajectory):
-        coords[fi] = atoms.positions.astype(np.float32) * 0.1
-        lx, ly, lz = ts.dimensions[:3]
-        boxes[fi] = np.diag(np.array([lx, ly, lz], dtype=np.float32) * 0.1)
+        coords[fi] = atoms.positions.astype(np.float32) * 0.1  # Å → nm
+        dims = ts.dimensions
+        if dims is not None and len(dims) >= 3:
+            boxes[fi] = np.diag(np.asarray(dims[:3], dtype=np.float32) * 0.1)
+        if traj_forces_path is None and ts.has_forces:
+            forces[fi] = (
+                atoms.forces.astype(np.float32) * 10.0
+            )  # kJ/(mol·Å) → kJ/(mol·nm)
 
-    species = np.asarray([atomic_number_from_mda_atom(a) for a in atoms], dtype=np.int32)
+    # Pass 2: forces from a separate file, if given.
+    if traj_forces_path is not None:
+        try:
+            u_f = mda.Universe(topology_path, traj_forces_path, topology_format="TPR")
+        except Exception:
+            if fallback_topology_path is None or not os.path.exists(
+                fallback_topology_path
+            ):
+                raise ValueError(
+                    f"Failed to read forces from '{traj_forces_path}' because the .tpr topology "
+                    f"could not be parsed and no valid fallback topology was found."
+                )
+            u_f = mda.Universe(fallback_topology_path, traj_forces_path)
+        atoms_f = u_f.select_atoms(selection) if selection != "all" else u_f.atoms
+        n_frames_f = len(u_f.trajectory)
+
+        if n_frames_f != n_frames:
+            raise ValueError(
+                f"Frame count mismatch: coord trajectory has {n_frames} frames, "
+                f"force trajectory ('{traj_forces_path}') has {n_frames_f} frames."
+            )
+
+        for fi, ts in enumerate(u_f.trajectory):
+            if ts.has_forces:
+                forces[fi] = atoms_f.forces.astype(np.float32) * 10.0
+
+    species = np.asarray(
+        [atomic_number_from_mda_atom(a) for a in atoms], dtype=np.int32
+    )
 
     return {
         "R": coords,
@@ -337,9 +459,6 @@ def load_gromacs_to_dataset(
         "box": boxes,
         "species": np.tile(species[None, :], (n_frames, 1)),
         "mask": np.ones((n_frames, n_atoms), dtype=bool),
-        "atom_names": np.asarray(atoms.names, dtype=object),
-        "residue_names": np.asarray(atoms.resnames, dtype=object),
-        "residue_ids": np.asarray(atoms.resids, dtype=np.int32),
     }
 
 
@@ -444,9 +563,10 @@ def save_xyz_frames_parallel(
         return
 
     # Parallel formatting
-    with open(filename, "w", buffering=buffer_bytes) as f, ProcessPoolExecutor(
-        max_workers=workers
-    ) as ex:
+    with (
+        open(filename, "w", buffering=buffer_bytes) as f,
+        ProcessPoolExecutor(max_workers=workers) as ex,
+    ):
         iterable = ((i, positions[i], species_col) for i in range(n_frames))
         for frame_str in ex.map(_format_xyz_frame, iterable, chunksize=chunksize):
             f.write(frame_str)
@@ -473,7 +593,7 @@ def scale_dataset(dataset, scale_R, scale_U, fractional=True):
 
 def scale_dataset_non_cubic(dataset, scale_R, scale_U, fractional=True):
     """Scales the dataset to kJ/mol and to nm.
-    
+
     Handles arbitrary triclinic boxes via fractional coordinate transform.
     box shape assumed: (n_frames, 3, 3) where rows are lattice vectors.
     """
@@ -495,7 +615,7 @@ def scale_dataset_non_cubic(dataset, scale_R, scale_U, fractional=True):
     print(f"Scale dataset by {scale_R} for R and {scale_U} for U.")
 
     scale_F = scale_U / scale_R
-    dataset["box"] = scale_R * dataset["box"]   # scales all lattice vector components
+    dataset["box"] = scale_R * dataset["box"]  # scales all lattice vector components
     dataset["F"] *= scale_F
 
     return dataset
@@ -532,8 +652,17 @@ def scale_dataset_box_aware(dataset, scale_R, scale_U, fractional=True):
 
 
 _ELEMENT_SYMBOLS: dict[int, str] = {
-    1: "H", 6: "C", 7: "N", 8: "O", 15: "P", 16: "S",
-    17: "Cl", 11: "Na", 12: "Mg", 19: "K", 20: "Ca",
+    1: "H",
+    6: "C",
+    7: "N",
+    8: "O",
+    15: "P",
+    16: "S",
+    17: "Cl",
+    11: "Na",
+    12: "Mg",
+    19: "K",
+    20: "Ca",
 }
 
 
@@ -594,7 +723,9 @@ def _cryst1_record(box_nm: np.ndarray) -> str:
 def _load_residue_maps_topology() -> dict:
     import json
 
-    path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "residue_maps.json")
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "data", "residue_maps.json"
+    )
     with open(path) as f:
         return json.load(f)
 
@@ -759,7 +890,9 @@ def unwrap_trajectory(
         unwrapped = np.empty_like(positions)
         unwrapped[0] = positions[0]
         for t in range(1, t_frames):
-            disp = np.asarray(_batch_disp_n(jnp.asarray(positions[t]), jnp.asarray(positions[t - 1])))
+            disp = np.asarray(
+                _batch_disp_n(jnp.asarray(positions[t]), jnp.asarray(positions[t - 1]))
+            )
             unwrapped[t] = unwrapped[t - 1] + disp
         return unwrapped
 

@@ -16,6 +16,7 @@ from . import structural
 from . import timeseries
 from . import training
 from . import molecules
+from . import priors
 
 __all__ = [
     "style",
@@ -24,4 +25,5 @@ __all__ = [
     "timeseries",
     "training",
     "molecules",
+    "priors",
 ]

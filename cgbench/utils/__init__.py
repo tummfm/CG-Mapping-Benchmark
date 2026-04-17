@@ -13,12 +13,10 @@ from . import chains
 from . import geometry
 from . import structural
 
-# Re-export commonly used functions for backward compatibility
 from .io import (
     load_trajectory,
     prepare_output_dir,
     save_xyz_frames_parallel,
-    scale_dataset,
 )
 from .chains import (
     get_line_locations,
@@ -55,7 +53,6 @@ __all__ = [
     "load_trajectory",
     "prepare_output_dir",
     "save_xyz_frames_parallel",
-    "scale_dataset",
     # chains functions
     "get_line_locations",
     "compute_line_locations",

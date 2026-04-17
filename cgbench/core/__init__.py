@@ -2,7 +2,7 @@
 Core functionality for CG mapping and datasets.
 """
 
-from .prior import BoltzmannPrior
+from .prior import BoltzmannPrior, SplineModel
 from .mapping import (
     map_dataset,
     get_map_weights,
@@ -11,9 +11,12 @@ from .mapping import (
     CappedPeptideMap,
     TIP3P_Water_Map,
     CATH_Map,
+    ThreeBPA_Map,
+    Azobenzene_Map,
 )
 from .dataset import (
     BaseDataset,
+    MixedDataset,
     Hexane_Dataset,
     TIP3P_water_Dataset,
     BenzeneCrystal_Dataset,
@@ -24,19 +27,29 @@ from .dataset import (
     Capped_Thr_Dataset,
     Capped_Gly_Dataset,
     SPICE_Dipeptides,
+    ThreeBPA_Dataset,
+    ThreeBPA_Biased_Dataset,
+    Azobenzene_Biased_Dataset,
+    CATHDomain_Dataset,
+    CATH_Dataset,
 )
 from .config import (
     MD_DATASET_PATHS,
+    STATIC_FRAME_DATASET_PATHS,
     SEED,
     DEFAULT_MACE_CONFIG,
     DEFAULT_NEQUIP_CONFIG,
+    DEFAULT_SPLINE_CONFIG,
     DEFAULT_TRAIN_CONFIG,
+    DEFAULT_FINETUNE_CONFIG,
+    DEFAULT_RE_CONFIG,
     DEFAULT_SIM_CONFIG,
     _get_available_datasets,
 )
 __all__ = [
-    # Prior
+    # Prior / SplineModel
     "BoltzmannPrior",
+    "SplineModel",
     # Mapping
     "map_dataset",
     "get_map_weights",
@@ -45,8 +58,11 @@ __all__ = [
     "CappedPeptideMap",
     "TIP3P_Water_Map",
     "CATH_Map",
+    "ThreeBPA_Map",
+    "Azobenzene_Map",
     # Dataset
     "BaseDataset",
+    "MixedDataset",
     "Hexane_Dataset",
     "TIP3P_water_Dataset",
     "BenzeneCrystal_Dataset",
@@ -57,12 +73,21 @@ __all__ = [
     "Capped_Thr_Dataset",
     "Capped_Gly_Dataset",
     "SPICE_Dipeptides",
+    "ThreeBPA_Dataset",
+    "ThreeBPA_Biased_Dataset",
+    "Azobenzene_Biased_Dataset",
+    "CATHDomain_Dataset",
+    "CATH_Dataset",
     # Config
     "MD_DATASET_PATHS",
+    "STATIC_FRAME_DATASET_PATHS",
     "SEED",
     "DEFAULT_MACE_CONFIG",
     "DEFAULT_NEQUIP_CONFIG",
+    "DEFAULT_SPLINE_CONFIG",
     "DEFAULT_TRAIN_CONFIG",
+    "DEFAULT_FINETUNE_CONFIG",
+    "DEFAULT_RE_CONFIG",
     "DEFAULT_SIM_CONFIG",
     "_get_available_datasets",
 ]

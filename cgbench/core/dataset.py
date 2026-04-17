@@ -1,5 +1,6 @@
 from chemtrain.data import preprocessing
 import copy
+import gc
 from collections import defaultdict
 from jax_md import space
 from jax import numpy as jnp
@@ -13,6 +14,8 @@ from .mapping import (
     CappedPeptideMap,
     TIP3P_Water_Map,
     CATH_Map,
+    ThreeBPA_Map,
+    Azobenzene_Map,
     _compute_bond_types_from_cg_bond_index,
     map_dataset,
 )
@@ -90,6 +93,7 @@ class BaseDataset:
 
         # Inject topology metadata for map classes that accept it
         import inspect
+
         sig = inspect.signature(map_class.__init__)
         if "residue_names" in sig.parameters:
             map_kwargs.setdefault("residue_names", topo_meta.get("residue_names"))
@@ -107,12 +111,46 @@ class BaseDataset:
         self.shift_fn_X = None
 
     def load_traj(self) -> None:
-        """Load atomistic trajectory/forces and build train/val/test splits."""
+        """Load atomistic trajectory/forces and build train/val/test splits.
+
+        If the dataset npz already exists at ``self.npz_path`` it is loaded
+        directly.  Otherwise the raw trajectory files (``traj`` / ``traj_forces``
+        keys in the dataset config) are read, converted, and saved as an npz for
+        future use.
+        """
         if self.dataset_X is not None and self.dataset_U is not None:
             return
 
-        print(f"Loading {self.dataset_name} trajectory from: {self.npz_path}")
-        dataset = dict(np.load(self.npz_path, allow_pickle=True))
+        if os.path.exists(self.npz_path):
+            print(f"Loading {self.dataset_name} from cached npz: {self.npz_path}")
+            dataset = dict(np.load(self.npz_path, allow_pickle=True))
+        else:
+            traj_path = self.ds_cfg.get("traj")
+            if traj_path is None:
+                raise FileNotFoundError(
+                    f"Dataset '{self.dataset_name}': npz not found at '{self.npz_path}' "
+                    f"and no 'traj' key is defined to load from a raw trajectory."
+                )
+            traj_forces_path = self.ds_cfg.get("traj_forces")
+            selection = self.ds_cfg.get("selection", "all")
+
+            print(f"Loading {self.dataset_name} trajectory from: {traj_path}")
+            if traj_forces_path is not None:
+                print(f"  Forces from: {traj_forces_path}")
+
+            dataset = io.load_gromacs_trajectory_with_forces(
+                topology_path=self.ds_cfg["topology"],
+                topology_fallback_path=self.ds_cfg.get("config"),
+                traj_path=traj_path,
+                traj_forces_path=traj_forces_path,
+                selection=selection,
+            )
+
+            npz_dir = os.path.dirname(self.npz_path)
+            if npz_dir:
+                os.makedirs(npz_dir, exist_ok=True)
+            np.savez_compressed(self.npz_path, **dataset)
+            print(f"Saved dataset npz to: {self.npz_path}")
 
         train_data, val_data, test_data = preprocessing.train_val_test_split(
             dataset,
@@ -130,8 +168,8 @@ class BaseDataset:
             dataset_["testing"] = test_data
 
         for split in dataset_.keys():
-            R = np.asarray(dataset_[split]["R"])
-            F = np.asarray(dataset_[split]["F"])
+            R = np.asarray(dataset_[split]["R"]).astype(np.float32, copy=False)
+            F = np.asarray(dataset_[split]["F"]).astype(np.float32, copy=False)
             n_frames = int(R.shape[0])
             n_atoms = int(R.shape[1])
 
@@ -146,21 +184,25 @@ class BaseDataset:
             dataset_[split]["F"] = F
 
             if "box" in dataset_[split] and dataset_[split]["box"] is not None:
-                box = np.asarray(dataset_[split]["box"])
+                box = np.asarray(dataset_[split]["box"]).astype(np.float32, copy=False)
                 dataset_[split]["box"] = box
             else:
-                dataset_[split]["box"] = np.tile(np.asarray(self.box), (n_frames, 1, 1))
+                dataset_[split]["box"] = np.tile(
+                    np.asarray(self.box, dtype=np.float32), (n_frames, 1, 1)
+                )
 
-            dataset_[split]["species"] = np.tile(np.asarray(self.species)[None, :], (n_frames, 1))
+            dataset_[split]["species"] = np.tile(
+                np.asarray(self.species, dtype=np.int32)[None, :], (n_frames, 1)
+            )
             dataset_[split]["mask"] = np.ones((n_frames, n_atoms), dtype=bool)
 
-        self.dataset_X = copy.deepcopy(dataset_)
+        self.dataset_X = dataset_
 
         dataset_frac = {}
         self.splits = dataset_.keys()
         for split in self.splits:
             dataset_frac[split] = io.scale_dataset_box_aware(
-                dataset_[split], scale_R=1, scale_U=1, fractional=True
+                copy.deepcopy(dataset_[split]), scale_R=1, scale_U=1, fractional=True
             )
 
         print("Training set size:", dataset_["training"]["R"].shape[0])
@@ -259,7 +301,10 @@ class BaseDataset:
                 self.n_cg_species = len(set(np.asarray(cg_species).tolist()))
                 self.cg_map_name = map
 
-                if "training" in self.cg_dataset_X and "box" in self.cg_dataset_X["training"]:
+                if (
+                    "training" in self.cg_dataset_X
+                    and "box" in self.cg_dataset_X["training"]
+                ):
                     self.box = self.cg_dataset_X["training"]["box"][0]
                     self._setup_displacement_functions()
                 return
@@ -272,8 +317,11 @@ class BaseDataset:
 
         bt = _compute_bond_types_from_cg_bond_index(self.cg_bond_index)
         self.cg_bond_types = {
-            k: jnp.array(v, dtype=jnp.int32) if len(v) > 0
-            else jnp.empty((0, 2), dtype=jnp.int32)
+            k: (
+                jnp.array(v, dtype=jnp.int32)
+                if len(v) > 0
+                else jnp.empty((0, 2), dtype=jnp.int32)
+            )
             for k, v in bt.items()
         }
         nb_parts = [
@@ -309,7 +357,7 @@ class BaseDataset:
                 "mask": jnp.ones((n_frames, n_cg_sites), dtype=bool),
             }
 
-        self.cg_dataset_X = copy.deepcopy(cg_dataset)
+        self.cg_dataset_X = cg_dataset
 
         # Create fractional coordinate versions
         cg_dataset_frac = {}
@@ -383,43 +431,61 @@ class MixedDataset:
         return out
 
     @staticmethod
+    def _with_subset(entry: dict, subset_id: int) -> dict:
+        n_frames = int(entry["R"].shape[0])
+        out = dict(entry)
+        out["subset"] = np.full((n_frames,), subset_id, dtype=np.int32)
+        return out
+
+    @staticmethod
     def _pad_and_concat(entries: list[dict], cg: bool = False) -> dict:
         if not entries:
             raise ValueError("No entries to merge for mixed dataset.")
 
         max_sites = max(int(e["R"].shape[1]) for e in entries)
-        all_R, all_F, all_box, all_species, all_mask, all_subset = [], [], [], [], [], []
-        all_n_sites = []
+        total_frames = sum(int(e["R"].shape[0]) for e in entries)
 
-        for e in entries:
-            n_frames = int(e["R"].shape[0])
-            n_sites = int(e["R"].shape[1])
-            pad = max_sites - n_sites
-
-            all_R.append(np.pad(np.asarray(e["R"]), ((0, 0), (0, pad), (0, 0))))
-            all_F.append(np.pad(np.asarray(e["F"]), ((0, 0), (0, pad), (0, 0))))
-            all_box.append(np.asarray(e["box"]))
-
-            species = np.asarray(e["species"]).astype(np.int32)
-            all_species.append(np.pad(species, ((0, 0), (0, pad)), constant_values=0))
-
-            mask = np.asarray(e["mask"]).astype(bool)
-            all_mask.append(np.pad(mask, ((0, 0), (0, pad)), constant_values=False))
-
-            all_subset.append(np.asarray(e["subset"]).astype(np.int32))
-            if cg:
-                all_n_sites.append(np.full((n_frames,), n_sites, dtype=np.int32))
+        r0 = np.asarray(entries[0]["R"])
+        f0 = np.asarray(entries[0]["F"])
+        b0 = np.asarray(entries[0]["box"])
+        r_dtype = r0.dtype
+        f_dtype = f0.dtype
+        b_dtype = b0.dtype
 
         merged = {
-            "R": np.concatenate(all_R, axis=0),
-            "F": np.concatenate(all_F, axis=0),
-            "box": np.concatenate(all_box, axis=0),
-            "species": np.concatenate(all_species, axis=0),
-            "mask": np.concatenate(all_mask, axis=0),
-            "subset": np.concatenate(all_subset, axis=0),
+            "R": np.zeros((total_frames, max_sites, 3), dtype=r_dtype),
+            "F": np.zeros((total_frames, max_sites, 3), dtype=f_dtype),
+            "box": np.zeros((total_frames, 3, 3), dtype=b_dtype),
+            "species": np.zeros((total_frames, max_sites), dtype=np.int32),
+            "mask": np.zeros((total_frames, max_sites), dtype=bool),
+            "subset": np.zeros((total_frames,), dtype=np.int32),
         }
         if cg:
-            merged["n_cg_sites"] = np.concatenate(all_n_sites, axis=0)
+            merged["n_cg_sites"] = np.zeros((total_frames,), dtype=np.int32)
+
+        start = 0
+        for e in entries:
+            R = np.asarray(e["R"])
+            F = np.asarray(e["F"])
+            box = np.asarray(e["box"])
+            species = np.asarray(e["species"], dtype=np.int32)
+            mask = np.asarray(e["mask"], dtype=bool)
+            subset = np.asarray(e["subset"], dtype=np.int32)
+
+            n_frames = int(R.shape[0])
+            n_sites = int(R.shape[1])
+            end = start + n_frames
+
+            merged["R"][start:end, :n_sites, :] = R
+            merged["F"][start:end, :n_sites, :] = F
+            merged["box"][start:end, :, :] = box
+            merged["species"][start:end, :n_sites] = species
+            merged["mask"][start:end, :n_sites] = mask
+            merged["subset"][start:end] = subset
+            if cg:
+                merged["n_cg_sites"][start:end] = n_sites
+            start = end
+
         return merged
 
     def _setup_displacement_functions(self):
@@ -435,28 +501,22 @@ class MixedDataset:
         self.displacement_fn_X = displacement_fn_X
         self.shift_fn_X = shift_fn_X
 
-    def load_traj(self, workers: int = 1) -> None:
+    def load_traj(self) -> None:
         if self.dataset_X is not None and self.dataset_U is not None:
             return
-
-        if workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(child.load_traj): (subset_id, name, child)
-                           for subset_id, (name, child) in enumerate(self.children)}
-                for future in as_completed(futures):
-                    future.result()  # re-raise any exception
 
         per_split_entries: dict[str, list[dict]] = defaultdict(list)
 
         for subset_id, (name, child) in enumerate(self.children):
-            if workers <= 1:
-                child.load_traj()
+            child.load_traj()
             for split, split_data in child.dataset_X.items():
-                merged_entry = copy.deepcopy(split_data)
-                n_frames = int(merged_entry["R"].shape[0])
-                merged_entry["subset"] = np.full((n_frames,), subset_id, dtype=np.int32)
-                per_split_entries[split].append(merged_entry)
+                per_split_entries[split].append(
+                    self._with_subset(split_data, subset_id)
+                )
+            # Child AA arrays are no longer needed once queued for merge.
+            child.dataset_U = None
+            child.dataset_X = None
+            gc.collect()
 
         out_X: dict[str, dict] = {}
         for split, entries in per_split_entries.items():
@@ -468,7 +528,10 @@ class MixedDataset:
         out_U: dict[str, dict] = {}
         for split in self.splits:
             out_U[split] = io.scale_dataset_box_aware(
-                copy.deepcopy(self.dataset_X[split]), scale_R=1, scale_U=1, fractional=True
+                copy.deepcopy(self.dataset_X[split]),
+                scale_R=1,
+                scale_U=1,
+                fractional=True,
             )
         self.dataset_U = out_U
 
@@ -478,33 +541,28 @@ class MixedDataset:
         self.n_species = len(np.unique(self.species[train_mask]))
         self._setup_displacement_functions()
 
-    def coarse_grain(self, map, cached_dataset_path: str | None = None, workers: int = 1):
+    def coarse_grain(self, map, cached_dataset_path: str | None = None):
         if self.dataset_X is None or self.dataset_U is None:
-            self.load_traj(workers=workers)
-
-        if workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(child.coarse_grain, map): (subset_id, name, child)
-                           for subset_id, (name, child) in enumerate(self.children)}
-                for future in as_completed(futures):
-                    future.result()  # re-raise any exception
+            self.load_traj()
 
         per_split_entries: dict[str, list[dict]] = defaultdict(list)
         cg_species_per_subset: dict[int, np.ndarray] = {}
         cg_bond_types_per_subset: dict[int, dict] = {}
 
         for subset_id, (name, child) in enumerate(self.children):
-            if workers <= 1:
-                child.coarse_grain(map)
+            child.coarse_grain(map)
             cg_species_per_subset[subset_id] = np.asarray(child.cg_species)
             cg_bond_types_per_subset[subset_id] = getattr(child, "cg_bond_types", None)
 
             for split, split_data in child.cg_dataset_X.items():
-                merged_entry = copy.deepcopy(split_data)
-                n_frames = int(merged_entry["R"].shape[0])
-                merged_entry["subset"] = np.full((n_frames,), subset_id, dtype=np.int32)
-                per_split_entries[split].append(merged_entry)
+                per_split_entries[split].append(
+                    self._with_subset(split_data, subset_id)
+                )
+
+            # Child CG arrays are no longer needed once queued for merge.
+            child.cg_dataset_U = None
+            child.cg_dataset_X = None
+            gc.collect()
 
         out_X: dict[str, dict] = {}
         for split, entries in per_split_entries.items():
@@ -516,7 +574,10 @@ class MixedDataset:
         out_U: dict[str, dict] = {}
         for split in self.splits:
             out_U[split] = io.scale_dataset_box_aware(
-                copy.deepcopy(self.cg_dataset_X[split]), scale_R=1, scale_U=1, fractional=True
+                copy.deepcopy(self.cg_dataset_X[split]),
+                scale_R=1,
+                scale_U=1,
+                fractional=True,
             )
         self.cg_dataset_U = out_U
 
@@ -589,7 +650,11 @@ class CATHDomain_Dataset(BaseDataset):
                 domain_index_path=self.domain_index_path,
                 residue_names=self.topology_residue_names,
                 residue_ids=self.topology_residue_ids,
-                n_atoms=len(self.topology_residue_ids) if self.topology_residue_ids is not None else None,
+                n_atoms=(
+                    len(self.topology_residue_ids)
+                    if self.topology_residue_ids is not None
+                    else None
+                ),
             )
             self.masses = jnp.array(self.map_obj.at_masses)
         return super().coarse_grain(map, cached_dataset_path=cached_dataset_path)
@@ -730,7 +795,9 @@ class TIP3P_water_Dataset(BaseDataset):
     - ``"HeavyAtom"``:  only the oxygen atom contributes.
     """
 
-    def __init__(self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True):
+    def __init__(
+        self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True
+    ):
         cfg_path = MD_DATASET_PATHS["tip3p-water"]["config"]
         snap = io.load_single_gro_snapshot_dataset(cfg_path)
         n_atoms = int(snap["R"].shape[1])
@@ -754,7 +821,9 @@ class TIP3P_water_Dataset(BaseDataset):
 class BenzeneCrystal_Dataset(BaseDataset):
     """Benzene crystal dataset wrapper."""
 
-    def __init__(self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True):
+    def __init__(
+        self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True
+    ):
         cfg_path = MD_DATASET_PATHS["benzene_crystal"]["config"]
         snap = io.load_single_gro_snapshot_dataset(cfg_path)
         n_atoms = int(snap["R"].shape[1])
@@ -793,7 +862,10 @@ class Capped_Ala_Dataset(BaseDataset):
             train_ratio=train_ratio,
             val_ratio=val_ratio,
             shuffle=shuffle,
-            map_kwargs={"residue_sequence": ["ACE", "ALA", "NME"], "mapping_type": mapping_type},
+            map_kwargs={
+                "residue_sequence": ["ACE", "ALA", "NME"],
+                "mapping_type": mapping_type,
+            },
             cache_cg=cache_cg,
         )
 
@@ -865,7 +937,10 @@ class Capped_Pro_Dataset(BaseDataset):
             train_ratio=train_ratio,
             val_ratio=val_ratio,
             shuffle=shuffle,
-            map_kwargs={"residue_sequence": ["ACE", "PRO", "NME"], "mapping_type": mapping_type},
+            map_kwargs={
+                "residue_sequence": ["ACE", "PRO", "NME"],
+                "mapping_type": mapping_type,
+            },
             cache_cg=cache_cg,
         )
 
@@ -887,7 +962,10 @@ class Capped_Thr_Dataset(BaseDataset):
             train_ratio=train_ratio,
             val_ratio=val_ratio,
             shuffle=shuffle,
-            map_kwargs={"residue_sequence": ["ACE", "THR", "NME"], "mapping_type": mapping_type},
+            map_kwargs={
+                "residue_sequence": ["ACE", "THR", "NME"],
+                "mapping_type": mapping_type,
+            },
             cache_cg=cache_cg,
         )
 
@@ -909,7 +987,10 @@ class Capped_Gly_Dataset(BaseDataset):
             train_ratio=train_ratio,
             val_ratio=val_ratio,
             shuffle=shuffle,
-            map_kwargs={"residue_sequence": ["ACE", "GLY", "NME"], "mapping_type": mapping_type},
+            map_kwargs={
+                "residue_sequence": ["ACE", "GLY", "NME"],
+                "mapping_type": mapping_type,
+            },
             cache_cg=cache_cg,
         )
 
@@ -922,7 +1003,9 @@ class SPICE_Dipeptides(BaseDataset):
     the requested mapping strategy and forwards the already-loaded data.
     """
 
-    def __init__(self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True):
+    def __init__(
+        self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True
+    ):
         self.dataset_name = "spice_dipeptides"
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
@@ -933,8 +1016,9 @@ class SPICE_Dipeptides(BaseDataset):
             f"Loading {self.dataset_name} dataset from:",
             MD_DATASET_PATHS[self.dataset_name]["path"],
         )
-        dataset = dict(np.load(MD_DATASET_PATHS[self.dataset_name]["path"], allow_pickle=True))
-
+        dataset = dict(
+            np.load(MD_DATASET_PATHS[self.dataset_name]["path"], allow_pickle=True)
+        )
 
         train_data, val_data, test_data = preprocessing.train_val_test_split(
             dataset,
@@ -968,7 +1052,6 @@ class SPICE_Dipeptides(BaseDataset):
         self.map_obj = None
         self.displacement_fn_X, _ = space.free()
 
-
     def coarse_grain(self, map):
         if map != "coreBetaMap2":
             raise ValueError(
@@ -985,123 +1068,6 @@ class SPICE_Dipeptides(BaseDataset):
         self.cg_weights = None
         self.cg_bonds = None
         self.cg_bond_types = None
-
-
-class PepsolDimers:
-    """Pre-mapped PepSol dipeptide dimer dataset (coreBetaMap2 only).
-
-    The NPZ produced by ``preprocess_pepsol_dimers.py`` is already coarse-
-    grained.  This class loads it, splits into train/val/test, and exposes a
-    ``coarse_grain`` method that validates the requested strategy and forwards
-    the already-loaded data.  Metadata fields ``id``, ``r0``, and ``window``
-    are preserved in every split dict alongside ``R``, ``F``, ``species``,
-    and ``mask``.
-
-    Uses ``space.periodic_general`` with the reference 6x6x6 nm box.
-    Trajectory coordinates are unwrapped (positions can lie outside the box),
-    so the dataset wraps them into ``[0, L)`` on load using
-    ``jax_md.space``'s shift function (``shift_fn(R, 0)``).
-    """
-
-    def __init__(self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True):
-        self.dataset_name = "pepsol_dimers"
-        self.train_ratio = train_ratio
-        self.val_ratio = val_ratio
-        self.shuffle = shuffle
-        self.cache_cg = bool(cache_cg)
-
-        print(
-            f"Loading {self.dataset_name} dataset from:",
-            MD_DATASET_PATHS[self.dataset_name]["path"],
-        )
-        dataset = dict(np.load(MD_DATASET_PATHS[self.dataset_name]["path"], allow_pickle=True))
-
-        train_data, val_data, test_data = preprocessing.train_val_test_split(
-            dataset,
-            shuffle=shuffle,
-            shuffle_seed=SEED,
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
-        )
-
-        dataset_ = {
-            "training": train_data,
-            "validation": val_data,
-        }
-        if test_data not in (None, {}):
-            dataset_["testing"] = test_data
-
-        # Box is fixed 6×6×6 nm for all PepSol dimer systems.
-        self.box = dataset_["training"]["box"][0]
-
-        # Build displacement / shift functions before wrapping so we can use
-        # shift_fn to fold positions back into [0, L) (the JAX-MD canonical way).
-        displacement_fn_X, shift_fn_X = space.periodic_general(
-            self.box, fractional_coordinates=False
-        )
-        self.displacement_fn_X = displacement_fn_X
-        self.shift_fn_X = shift_fn_X
-        displacement_fn_U, shift_fn_U = space.periodic_general(
-            self.box, fractional_coordinates=True
-        )
-        self.displacement_fn_U = displacement_fn_U
-        self.shift_fn_U = shift_fn_U
-
-        # Wrap unwrapped coordinates into the box: shift_fn(R, 0) folds any
-        # position back into [0, L) for each periodic dimension.
-        # Then move padded beads (mask=False) to box centre so they are always
-        # far (>2.5 nm) from any real bead, preventing NaN in MACE's radial
-        # basis functions caused by near-zero distances to the padded origin.
-        box_center = np.diag(self.box) / 2.0  # [3.0, 3.0, 3.0] nm
-        for split in dataset_.keys():
-            R = dataset_[split]["R"].astype(np.float32)
-            R = np.asarray(shift_fn_X(jnp.asarray(R), jnp.zeros_like(R)))
-            mask = dataset_[split]["mask"]  # (N, max_cg) bool
-            dataset_[split]["R"] = np.where(mask[:, :, None], R, box_center[None, None, :])
-            dataset_[split]["F"] = dataset_[split]["F"]
-            dataset_[split]["species"] = dataset_[split]["species"]
-            dataset_[split]["mask"] = dataset_[split]["mask"]
-
-        self.dataset_X = copy.deepcopy(dataset_)
-        print("Training set size:", dataset_["training"]["R"].shape[0])
-        print("Validation set size:", dataset_["validation"]["R"].shape[0])
-
-        self.species = dataset_["training"]["species"][0]
-        self.n_species = len(np.unique(self.species[dataset_["training"]["mask"][0]]))
-        self.masses = None
-        self.map_obj = None
-
-        # Fractional coordinate version
-        self.splits = dataset_.keys()
-        dataset_frac = {}
-        for split in self.splits:
-            dataset_frac[split] = io.scale_dataset_box_aware(
-                dataset_[split], scale_R=1, scale_U=1, fractional=True
-            )
-        self.dataset_U = dataset_frac
-
-    def coarse_grain(self, map):
-        if map != "coreBetaMap2":
-            raise ValueError(
-                "PepsolDimers is only available for map='coreBetaMap2'. "
-                f"Received map='{map}'."
-            )
-
-        self.cg_dataset_X = copy.deepcopy(self.dataset_X)
-        self.cg_species = self.species
-        self.n_cg_sites = self.cg_dataset_X["training"]["R"].shape[1]
-        self.n_cg_species = len(np.unique(self.cg_species[self.cg_dataset_X["training"]["mask"][0]]))
-        self.cg_masses = None
-        self.cg_weights = None
-        self.cg_bonds = None
-        self.cg_bond_types = None
-
-        cg_dataset_frac = {}
-        for split in self.splits:
-            cg_dataset_frac[split] = io.scale_dataset_box_aware(
-                self.cg_dataset_X[split], scale_R=1, scale_U=1, fractional=True
-            )
-        self.cg_dataset_U = cg_dataset_frac
 
 
 class CATH_Dataset(MixedDataset):
@@ -1143,7 +1109,9 @@ class CATH_Dataset(MixedDataset):
         if domain_index_path is not None:
             index_candidates.append(domain_index_path)
         index_candidates.append(_DEFAULT_DOMAIN_INDEX)
-        index_candidates.append("/ds/project/franz/projects/CG-Bench/data/domain_residue_index.json")
+        index_candidates.append(
+            "/ds/project/franz/projects/CG-Bench/data/domain_residue_index.json"
+        )
 
         index_path = None
         for cand in index_candidates:
@@ -1177,7 +1145,11 @@ class CATH_Dataset(MixedDataset):
             gro_path = os.path.join(domain_dir, "md.gro")
             tpr_path = os.path.join(domain_dir, "md.tpr")
 
-            if not (os.path.exists(npz_path) and os.path.exists(gro_path) and os.path.exists(tpr_path)):
+            if not (
+                os.path.exists(npz_path)
+                and os.path.exists(gro_path)
+                and os.path.exists(tpr_path)
+            ):
                 missing_domains.append(domain_name)
                 continue
 
@@ -1194,7 +1166,9 @@ class CATH_Dataset(MixedDataset):
             children.append((domain_name, child))
 
         if not children:
-            raise RuntimeError("No CATH domains with complete dataset.npz/md.gro/md.tpr were found.")
+            raise RuntimeError(
+                "No CATH domains with complete dataset.npz/md.gro/md.tpr were found."
+            )
 
         if missing_domains:
             print(
@@ -1210,8 +1184,70 @@ class CATH_Dataset(MixedDataset):
             cache_cg=cache_cg,
         )
 
-    def coarse_grain(self, map=None, cached_dataset_path=None, workers: int = 1):
+    def coarse_grain(self, map=None, cached_dataset_path=None):
         effective_map = map or self.cg_strategy
         self.cg_strategy = effective_map
-        return super().coarse_grain(effective_map, cached_dataset_path=cached_dataset_path, workers=workers)
+        return super().coarse_grain(
+            effective_map, cached_dataset_path=cached_dataset_path
+        )
 
+
+class ThreeBPA_Dataset(BaseDataset):
+    """3-bromopropionic acid (3BPA) dataset.
+
+    On first use the .npz is generated from the .trr trajectory and cached at
+    the path defined in MD_DATASET_PATHS["3bpa"]["path"].
+
+    Maps:
+    - ``"LVC=0.6"``: placeholder mapping — to be completed in ThreeBPA_Map.
+    """
+
+    def __init__(
+        self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True
+    ):
+        super().__init__(
+            dataset_name="3bpa",
+            map_class=ThreeBPA_Map,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            shuffle=shuffle,
+            map_kwargs={},
+            cache_cg=cache_cg,
+        )
+        self.bpa_map = self.map_obj
+
+
+class ThreeBPA_Biased_Dataset(BaseDataset):
+    """Biased 3-bromopropionic acid (3BPA) dataset wrapper."""
+
+    def __init__(
+        self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True
+    ):
+        super().__init__(
+            dataset_name="3bpa_biased",
+            map_class=ThreeBPA_Map,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            shuffle=shuffle,
+            map_kwargs={},
+            cache_cg=cache_cg,
+        )
+        self.bpa_map = self.map_obj
+
+
+class Azobenzene_Biased_Dataset(BaseDataset):
+    """Biased azobenzene dataset wrapper using a temporary dummy mapping."""
+
+    def __init__(
+        self, train_ratio=0.7, val_ratio=0.1, shuffle=True, cache_cg: bool = True
+    ):
+        super().__init__(
+            dataset_name="azobenzene_biased",
+            map_class=Azobenzene_Map,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            shuffle=shuffle,
+            map_kwargs={},
+            cache_cg=cache_cg,
+        )
+        self.azobenzene_map = self.map_obj
