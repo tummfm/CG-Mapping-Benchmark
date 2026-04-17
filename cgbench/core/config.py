@@ -214,7 +214,7 @@ DEFAULT_RE_CONFIG = {
 DEFAULT_SIM_CONFIG = {
     "gamma": 100.0,  # Friction coefficient in 1/ps (for NVT Langevin)
     "dt_values_fs": [2],  # Add more dt values as needed
-    "print_every": 0.01,  # Save frame every 0.5 ps
+    "print_every": 0.5,  # Save frame every 0.5 ps
     "sim_mode": "sampling",  # simulation mode: 'sampling', 'stability', 'helix', 'speed'
     "ensemble": "NVT",  # NVT or NVE
     # "t_eq": 0,  # Equlibration time in ps
