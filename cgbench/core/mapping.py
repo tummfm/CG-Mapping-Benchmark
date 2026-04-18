@@ -195,6 +195,68 @@ def _derive_cg_topology(
     return bond_arr, angle_arr, dihedral_arr
 
 
+def _derive_cg_topology_from_atomistic_graph(
+    at_bonds: list[tuple[int, int]] | np.ndarray,
+    mapping_indices: list[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Derive CG topology by contracting an atomistic bond graph.
+
+    Steps:
+    1) Build CG bond graph by mapping each atomistic bond (a, b) -> (I, J).
+       If either endpoint is excluded (index < 0) or I == J, the edge is skipped.
+    2) Deduplicate undirected CG bonds.
+    3) Derive CG angles/dihedrals by iterating the resulting CG bond graph.
+
+    Args:
+        at_bonds: Atomistic undirected bonds as (N, 2) or list[(i, j)].
+        mapping_indices: Atom->CG index assignment; -1 means excluded atom.
+
+    Returns:
+        (cg_bond_index, cg_angle_index, cg_dihedral_index) as column-major arrays.
+    """
+    print(f"[MAPPING] Deriving CG topology via Graph contraction from atomistic graph with {len(at_bonds)} bonds.")
+    if at_bonds is None:
+        return (
+            np.zeros((2, 0), dtype=np.int32),
+            np.zeros((3, 0), dtype=np.int32),
+            np.zeros((4, 0), dtype=np.int32),
+        )
+
+    bond_arr = np.asarray(at_bonds, dtype=np.int32)
+    if bond_arr.size == 0:
+        return (
+            np.zeros((2, 0), dtype=np.int32),
+            np.zeros((3, 0), dtype=np.int32),
+            np.zeros((4, 0), dtype=np.int32),
+        )
+    if bond_arr.ndim != 2 or bond_arr.shape[1] != 2:
+        raise ValueError(
+            f"Expected atomistic bonds with shape (N, 2), got {bond_arr.shape}."
+        )
+
+    n_atoms = len(mapping_indices)
+    cg_bond_set: set[tuple[int, int]] = set()
+
+    for ai, aj in bond_arr:
+        i, j = int(ai), int(aj)
+        if i < 0 or j < 0 or i >= n_atoms or j >= n_atoms:
+            raise ValueError(
+                "Atomistic bond index out of range for provided mapping_indices: "
+                f"({i}, {j}) with n_atoms={n_atoms}."
+            )
+
+        cg_i = int(mapping_indices[i])
+        cg_j = int(mapping_indices[j])
+
+        if cg_i < 0 or cg_j < 0 or cg_i == cg_j:
+            continue
+
+        cg_bond_set.add((min(cg_i, cg_j), max(cg_i, cg_j)))
+
+    cg_bond_pairs = [list(p) for p in sorted(cg_bond_set)]
+    return _derive_cg_topology(cg_bond_pairs)
+
+
 def _tile_topology(
     single_bonds: list[list[int]],
     single_angles: list[list[int]],
@@ -541,18 +603,18 @@ class Hexane_Map:
     def __init__(self, nmol: int = 100):
         self.n_replicas = nmol
         self.at_masses = [mass_map[s] for s in self._base_species] * nmol
+        at_bonds_global = self._tile_atomistic_bonds(
+            self._at_bonds_single,
+            n_atoms_per_mol=len(self._base_species),
+        )
 
         self._maps: dict[str, dict] = {}
         for name, (n_cg, single_idx, cg_sp) in self._map_specs.items():
             indices = self._tile_indices(single_idx, n_cg)
             cg_species = np.array(cg_sp * nmol, dtype=np.int32)
 
-            # Linear CG chain topology, tiled across molecules
-            s_bonds = [[i, i + 1] for i in range(n_cg - 1)]
-            s_angles = [[i, i + 1, i + 2] for i in range(n_cg - 2)]
-            s_dihedrals = [[i, i + 1, i + 2, i + 3] for i in range(n_cg - 3)]
-            cg_bonds, cg_angles, cg_dihedrals = _tile_topology(
-                s_bonds, s_angles, s_dihedrals, n_cg, nmol
+            cg_bonds, cg_angles, cg_dihedrals = (
+                _derive_cg_topology_from_atomistic_graph(at_bonds_global, indices)
             )
 
             self._maps[name] = {
@@ -570,6 +632,17 @@ class Hexane_Map:
             for v in single:
                 result.append(-1 if v < 0 else v + offset)
         return result
+
+    def _tile_atomistic_bonds(
+        self,
+        single_bonds: list[tuple[int, int]],
+        n_atoms_per_mol: int,
+    ) -> list[tuple[int, int]]:
+        bonds: list[tuple[int, int]] = []
+        for m in range(self.n_replicas):
+            off = m * n_atoms_per_mol
+            bonds.extend([(i + off, j + off) for i, j in single_bonds])
+        return bonds
 
     def get_available_maps(self) -> list[str]:
         return list(self._maps)
@@ -636,20 +709,20 @@ class BenzeneCrystal_Map:
         (5, 11),
     ]
 
-    # Triangle topology for one molecule
-    _single_bonds = [[0, 1], [1, 2], [0, 2]]
-    _single_angles = [[2, 0, 1], [0, 1, 2], [0, 2, 1]]
-    _single_dihedrals: list[list[int]] = []  # no 4-site dihedrals in a triangle
-
     def __init__(self, nmol: int = 128):
         self.n_replicas = nmol
         self.at_masses = [mass_map[s] for s in self._base_species] * nmol
+        at_bonds_global = self._tile_atomistic_bonds(
+            self._at_bonds_single,
+            n_atoms_per_mol=len(self._base_species),
+        )
 
         single_indices = [0, 0, 1, 1, 2, 2, -1, -1, -1, -1, -1, -1]
         indices = self._tile_indices(single_indices, block_size=3)
         cg_species = np.array([1, 1, 1] * nmol, dtype=np.int32)
-        cg_bonds, cg_angles, cg_dihedrals = _tile_topology(
-            self._single_bonds, self._single_angles, self._single_dihedrals, 3, nmol
+        cg_bonds, cg_angles, cg_dihedrals = _derive_cg_topology_from_atomistic_graph(
+            at_bonds_global,
+            indices,
         )
 
         self._maps = {
@@ -669,6 +742,17 @@ class BenzeneCrystal_Map:
             for v in single:
                 result.append(-1 if v < 0 else v + offset)
         return result
+
+    def _tile_atomistic_bonds(
+        self,
+        single_bonds: list[tuple[int, int]],
+        n_atoms_per_mol: int,
+    ) -> list[tuple[int, int]]:
+        bonds: list[tuple[int, int]] = []
+        for m in range(self.n_replicas):
+            off = m * n_atoms_per_mol
+            bonds.extend([(i + off, j + off) for i, j in single_bonds])
+        return bonds
 
     @staticmethod
     def _normalize_map_name(name: str) -> str:
@@ -1177,10 +1261,10 @@ class ThreeBPA_Map:
     """CG mapping for 3-bromopropionic acid (3BPA).
 
     Available maps:
-    - ``"LVC=0.6"``: LVC-based mapping with cutoff 0.6.
+        - ``"LVC=0.6"``: LVC-based mapping
     """
 
-    def __init__(self):
+    def __init__(self, at_bonds: list[tuple[int, int]] | np.ndarray | None = None):
         # Placeholder: LVC=0.6
         self.base_species = [
             "C",
@@ -1213,45 +1297,53 @@ class ThreeBPA_Map:
         ]
         self.at_masses = [mass_map[s] for s in self.base_species]
 
-        empty_bonds = np.zeros((2, 0), dtype=np.int32)
-        empty_angles = np.zeros((3, 0), dtype=np.int32)
-        empty_dihedrals = np.zeros((4, 0), dtype=np.int32)
+        lvc_indices = [
+            0,  # 1BPA               1LIG     C1
+            1,  # 1BPA               1LIG     C2
+            0,  # 1BPA               1LIG     C3
+            -1,  # 1BPA              1LIG     H1
+            1,  # 1BPA               1LIG     C4
+            4,  # 1BPA       O       1LIG     O5
+            3,  # 1BPA       N       1LIG     N1
+            2,  # 1BPA               1LIG     N2
+            -1,  # 1BPA              1LIG     H2
+            -1,  # 1BPA              1LIG     H3
+            2,  # 1BPA               1LIG     C5
+            -1,  # 1BPA              1LIG     H4
+            -1,  # 1BPA              1LIG     H5
+            5,  # 1BPA               1LIG     C6
+            6,  # 1BPA               1LIG     C7
+            -1,  # 1BPA              1LIG     H6
+            -1,  # 1BPA              1LIG     H7
+            7,  # 1BPA               1LIG     C8
+            6,  # 1BPA               1LIG     C9
+            7,  # 1BPA               1LIG    C10
+            -1,  # 1BPA              1LIG    H10
+            8,  # 1BPA               1LIG    C11
+            -1,  # 1BPA              1LIG    H11
+            8,  # 1BPA               1LIG    C12
+            -1,  # 1BPA              1LIG    H12
+            -1,  # 1BPA              1LIG    H13
+            -1,  # 1BPA              1LIG    H14
+        ]
+
+        try:
+            bonds, angles, dihedrals = (
+                _derive_cg_topology_from_atomistic_graph(at_bonds, lvc_indices)
+            )
+        except Exception as e:
+            print(f"Error deriving CG topology for 3BPA: {e}")
+            bonds = np.zeros((2, 0), dtype=np.int32)
+            angles = np.zeros((3, 0), dtype=np.int32)
+            dihedrals = np.zeros((4, 0), dtype=np.int32)
 
         self._maps = {
             "LVC=0.6": {
-                "indices": [
-                    0,  # 1BPA      C    1
-                    1,  # 1BPA     C1    2
-                    0,  # 1BPA     C2    3
-                    -1,  # 1BPA      H    4
-                    1,  # 1BPA     C3    5 d2
-                    4,  # 1BPA      O    6  d1
-                    3,  # 1BPA      N    7  d2
-                    2,  # 1BPA     N1    8
-                    -1,  # 1BPA     H1    9
-                    -1,  # 1BPA     H2   10
-                    2,  # 1BPA     C4   11
-                    -1,  # 1BPA     H3   12
-                    -1,  # 1BPA     H4   13
-                    5,  # 1BPA     C5   14  d1
-                    6,  # 1BPA     C6   15
-                    -1,  # 1BPA     H5   16
-                    -1,  # 1BPA     H6   17
-                    7,  # 1BPA     C7   18
-                    6,  # 1BPA     C8   19
-                    7,  # 1BPA     C9   20
-                    -1,  # 1BPA     H7   21
-                    8,  # 1BPA    C10   22
-                    -1,  # 1BPA     H8   23
-                    8,  # 1BPA    C11   24
-                    -1,  # 1BPA     H9   25
-                    -1,  # 1BPA    H10   26
-                    -1,  # 1BPA    H11   27
-                ],
+                "indices": list(lvc_indices),
                 "cg_species": [1, 1, 2, 3, 4, 5, 1, 1, 1],
-                "cg_bonds": empty_bonds,
-                "cg_angles": empty_angles,
-                "cg_dihedrals": empty_dihedrals,
+                "cg_bonds": bonds,
+                "cg_angles": angles,
+                "cg_dihedrals": dihedrals,
             },
         }
 
@@ -1295,7 +1387,7 @@ class ThreeBPA_Map:
 class Azobenzene_Map:
     """ """
 
-    def __init__(self):
+    def __init__(self, at_bonds: list[tuple[int, int]] | np.ndarray | None = None):
         self.base_species = [
             "N",
             "N",
@@ -1324,42 +1416,50 @@ class Azobenzene_Map:
         ]
         self.at_masses = [mass_map[s] for s in self.base_species]
 
-        empty_bonds = np.zeros((2, 0), dtype=np.int32)
-        empty_angles = np.zeros((3, 0), dtype=np.int32)
-        empty_dihedrals = np.zeros((4, 0), dtype=np.int32)
+        lvc_indices = [
+            0,  # 1LIG     N1
+            1,  # 1LIG     N2
+            2,  # 1LIG     C1
+            2,  # 1LIG     C2
+            3,  # 1LIG     C3
+            3,  # 1LIG     C4
+            4,  # 1LIG     C5
+            4,  # 1LIG     C6
+            5,  # 1LIG     C7
+            5,  # 1LIG     C8
+            6,  # 1LIG     C9
+            6,  # 1LIG    C10
+            7,  # 1LIG    C11
+            7,  # 1LIG    C12
+            -1,  # 1LIG     H1
+            -1,  # 1LIG     H2
+            -1,  # 1LIG     H3
+            -1,  # 1LIG     H4
+            -1,  # 1LIG     H5
+            -1,  # 1LIG     H6
+            -1,  # 1LIG     H7
+            -1,  # 1LIG     H8
+            -1,  # 1LIG     H9
+            -1,  # 1LIG    H10
+        ]
+
+        try:
+            bonds, angles, dihedrals = (
+                _derive_cg_topology_from_atomistic_graph(at_bonds, lvc_indices)
+            )
+        except Exception as e:
+            print(f"Error deriving CG topology for Azobenzene: {e}")
+            bonds = np.zeros((2, 0), dtype=np.int32)
+            angles = np.zeros((3, 0), dtype=np.int32)
+            dihedrals = np.zeros((4, 0), dtype=np.int32)
 
         self._maps = {
             "LVC=0.45": {
-                "indices": [
-                    0,  # 1LIG     N1 d1 dihedral1_3
-                    1,  # 1LIG     N2 d2 dihedral1_2
-                    2,  # 1LIG     C1 d2 dihedral1_1
-                    2,  # 1LIG     C2
-                    3,  # 1LIG     C3
-                    3,  # 1LIG     C4
-                    4,  # 1LIG     C5
-                    4,  # 1LIG     C6
-                    5,  # 1LIG     C7 d1 dihedral1_4
-                    5,  # 1LIG     C8
-                    6,  # 1LIG     C9
-                    6,  # 1LIG    C10
-                    7,  # 1LIG     C11
-                    7,  # 1LIG     C12
-                    -1,  # 1LIG     H1
-                    -1,  # 1LIG     H2
-                    -1,  # 1LIG     H3
-                    -1,  # 1LIG     H4
-                    -1,  # 1LIG     H5
-                    -1,  # 1LIG     H6
-                    -1,  # 1LIG     H7
-                    -1,  # 1LIG     H8
-                    -1,  # 1LIG     H9
-                    -1,  # 1LIG    H10
-                ],
+                "indices": list(lvc_indices),
                 "cg_species": [1, 1, 2, 2, 2, 2, 2, 2],  # 1 = N, 2 = C-C
-                "cg_bonds": empty_bonds,
-                "cg_angles": empty_angles,
-                "cg_dihedrals": empty_dihedrals,
+                "cg_bonds": bonds,
+                "cg_angles": angles,
+                "cg_dihedrals": dihedrals,
             },
         }
 

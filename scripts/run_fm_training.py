@@ -341,7 +341,7 @@ mask_init = jnp.asarray(dataset_dict["training"]["mask"][0])
 
 if args.model == "mace":
     mace_cfg = build_mace_config(MODEL_CONFIG, use_so3=args.use_so3)
-    _init_params, model_energy_fn_template, _model_config = init_mace_model_and_template(
+    init_params, model_energy_fn_template, model_config = init_mace_model_and_template(
         displacement_fn,
         MODEL_CONFIG["r_cutoff"],
         box,

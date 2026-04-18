@@ -136,25 +136,51 @@ config["sim_mol"], data, config["nmol"] = load_simulation_dataset(
     verbose=args.verbose,
 )
 
-# TODO: Fix real coordinate simulation issue
+splits = ["training", "validation"]
+
+# Data selection
 if MODEL_CONFIG["type"] == "AT":
     if hasattr(data, "load_traj"):
         data.load_traj()
+
     dataset_dict = data.dataset_U
     masses = data.masses
     species = data.species
+
 else:
     data.coarse_grain(MODEL_CONFIG["CG_map"])
+
     dataset_dict = data.cg_dataset_U
     masses = data.cg_masses
     species = data.cg_species
 
-if data.box is not None:
-    displacement_fn, _ = space.periodic_general(box=data.box, fractional_coordinates=True)
+if backend == "spline":
+    dataset_dict = data.cg_dataset_X
+    masses = data.cg_masses
+    species = data.cg_species
+    fractional = False
 else:
-    displacement_fn, _ = space.free()
+    fractional = True
+
+# Ref coords for plots
+if "testing" in dataset_dict:
+    splits = [*splits, "testing"]
+ref_coords = onp.asarray(jnp.concatenate(
+    [dataset_dict[s]["R"] for s in splits],
+    axis=0
+))
+
+# JAX-MD Displacement function
 box = data.box
 
+if box is not None:
+    displacement_fn, plotting_shift_fn = space.periodic_general(
+        box=box,
+        fractional_coordinates=fractional
+    )
+else:
+    displacement_fn, plotting_shift_fn = space.free()
+    
 print(f"[SPECIES]: {species}")
 
 nbrs_init, (max_neighbors, max_edges, avg_num_neighbors) = (
@@ -376,7 +402,7 @@ def init_simulator(
     return reference_state, jax.jit(traj_gen)
 
 
-def visualise(traj_path, dataset_dict):
+def visualise(traj_path, dataset_dict, displacement_fn, shift_fn, ref_coords):
     from cgbench.plotting import molecules as visualise_traj
 
     vis_fn_map = {
@@ -410,13 +436,24 @@ def visualise(traj_path, dataset_dict):
             type=MODEL_CONFIG["type"],
             dataset=dataset_dict,
             cg_map=MODEL_CONFIG["CG_map"],
+            disp_fn=displacement_fn,
+            shift_fn=shift_fn,
+            ref_coords=ref_coords,
         )
     else:
         raise ValueError(f"No visualizer registered for molecule: {config['sim_mol']}")
 
 
 def _save_outputs_and_plot(
-    save_dir, traj_state, dt_ps, t_total_ps, box_obj, dataset_dict
+    save_dir,
+    traj_state,
+    dt_ps,
+    t_total_ps,
+    box_obj,
+    dataset_dict,
+    displacement_fn,
+    shift_fn,
+    ref_coords,
 ):
     with open(os.path.join(save_dir, "trajectory.pkl"), "wb") as f:
         pickle.dump(traj_state.trajectory.position, f)
@@ -434,7 +471,7 @@ def _save_outputs_and_plot(
         json.dump(config_, cf, indent=4)
 
     try:
-        visualise(save_dir, dataset_dict)
+        visualise(save_dir, dataset_dict, displacement_fn, shift_fn, ref_coords)
     except Exception as e:
         print(f"Error during visualisation: {e}")
 
@@ -498,7 +535,7 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
 
         if os.path.exists(os.path.join(save_dir, "trajectory.pkl")):
             print(f"Found existing trajectory in {save_dir}; skipping run.")
-            visualise(save_dir, data)
+            visualise(save_dir, data, displacement_fn, plotting_shift_fn, ref_coords)
             continue
 
         reference_state, traj_generator = init_simulator(
@@ -534,6 +571,9 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
             t_total_ps=config["t_total"],
             box_obj=box,
             dataset_dict=data,
+            displacement_fn=displacement_fn,
+            shift_fn=plotting_shift_fn,
+            ref_coords=ref_coords,
         )
 
         print(f"Finished dt = {dt_fs} fs. Results saved to {save_dir}.")

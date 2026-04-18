@@ -18,12 +18,16 @@ MOL_ALIASES = {
 
 
 def configure_runtime_environment(
-    device: str = "",
+    device: str | None = "",
     xla_mem_fraction: float = 0.96,
 ) -> None:
     """Configure CUDA device visibility and XLA memory behavior before JAX import."""
-    print("[DEVICE] Running on device(s):", device if device else "[DEVICE] No device specified, running on CPU")
-    os.environ["CUDA_VISIBLE_DEVICES"] = device
+    device_str = "" if device is None else str(device)
+    print(
+        "[DEVICE] Running on device(s):",
+        device_str if device_str else "[DEVICE] No device specified, running on CPU",
+    )
+    os.environ["CUDA_VISIBLE_DEVICES"] = device_str
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(xla_mem_fraction)
 
 

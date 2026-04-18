@@ -99,6 +99,15 @@ class BaseDataset:
             map_kwargs.setdefault("residue_names", topo_meta.get("residue_names"))
             map_kwargs.setdefault("residue_ids", topo_meta.get("residue_ids"))
             map_kwargs.setdefault("n_atoms", topo_meta.get("n_atoms"))
+        if "at_bonds" in sig.parameters:
+            topo_bonds = np.asarray(topo_meta.get("bonds", []), dtype=np.int32)
+            if topo_bonds.size == 0:
+                map_kwargs.setdefault("at_bonds", [])
+            else:
+                map_kwargs.setdefault(
+                    "at_bonds",
+                    [tuple(map(int, b)) for b in topo_bonds.tolist()],
+                )
 
         # Initialize mapping
         self.map_obj = map_class(**map_kwargs)

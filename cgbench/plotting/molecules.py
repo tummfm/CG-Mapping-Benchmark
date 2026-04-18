@@ -16,7 +16,6 @@ from cgbench.utils.geometry import (
     init_dihedral_fn,
     init_angle_fn,
     compute_atom_distance,
-    periodic_displacement,
 )
 from cgbench.utils.chains import compute_line_locations, split_into_chains
 from cgbench.plotting.timeseries import (
@@ -33,6 +32,24 @@ from cgbench.plotting.structural import (
 )
 from cgbench.plotting.distributions import plot_1d_dihedral, plot_1d_angle, plot_1d_bond
 from cgbench.utils.structural import calculate_rdf
+
+
+def _require_displacement_fn(disp_fn, fn_name: str):
+    if disp_fn is None:
+        raise ValueError(
+            f"{fn_name} requires a displacement function. "
+            "Pass disp_fn from scripts/run_simulation.py."
+        )
+    return disp_fn
+
+
+def _require_ref_coords(ref_coords, fn_name: str):
+    if ref_coords is None:
+        raise ValueError(
+            f"{fn_name} requires reference coordinates. "
+            "Pass ref_coords from scripts/run_simulation.py."
+        )
+    return np.asarray(ref_coords)
 
 
 def plot_hexane_angle(
@@ -260,12 +277,20 @@ def _plot_martini3_capped_angles(
 
 
 def vis_capped_ala(
-    traj_path, config, type="AT", name="Simulation", dataset=None, cg_map="hmerged"
+    traj_path,
+    config,
+    type="AT",
+    name="Simulation",
+    dataset=None,
+    cg_map="hmerged",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize alanine dipeptide trajectory."""
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_capped_ala")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
 
@@ -274,14 +299,6 @@ def vis_capped_ala(
         phi_indices = [4, 6, 8, 14]
         psi_indices = [6, 8, 14, 16]
         pairs = [(4, 6), (6, 8), (8, 14)]
-        ref_coords = np.concatenate(
-            [
-                dataset.dataset_U["training"]["R"],
-                dataset.dataset_U["validation"]["R"],
-                dataset.dataset_U["testing"]["R"],
-            ],
-            axis=0,
-        )
     else:
         maps = {
             "hmerged": ([1, 3, 4, 6], [3, 4, 6, 8], [(1, 3), (3, 4), (4, 6)]),
@@ -298,15 +315,8 @@ def vis_capped_ala(
             "martini3": ([3, 1, 2, 0], [3, 1, 2, 0], [(0, 1), (1, 2), (1, 3)]),
         }
         phi_indices, psi_indices, pairs = maps[cg_map]
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits],
-            axis=0,
-        )
+    ref_coords = _require_ref_coords(ref_coords, "vis_capped_ala")
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     ala2_dihedral_fn = init_dihedral_fn(disp_fn, [phi_indices, psi_indices])
     AT_phi, AT_psi = ala2_dihedral_fn(ref_coords)
@@ -343,9 +353,12 @@ def vis_hexane(
     dataset=None,
     cg_map="six-site",
     nmol=100,
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize hexane trajectory."""
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_hexane")
     outpath = prepare_output_dir(traj_path)
     config = json.load(
         open(os.path.join(os.path.dirname(traj_path), "traj_config.json"), "r")
@@ -353,7 +366,6 @@ def vis_hexane(
     line_locs = compute_line_locations(config)
 
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     # Initialize variables
     cg_dihedral_idcs = None
@@ -380,15 +392,6 @@ def vis_hexane(
             (16, 18),
             (16, 19),
         ]
-        ref_coords = np.concatenate(
-            [
-                dataset.dataset_X["training"]["R"],
-                dataset.dataset_X["validation"]["R"],
-                dataset.dataset_X["testing"]["R"],
-            ],
-            axis=0,
-        )
-
     else:
         definitions = {
             "two-site": ([(0, 1)], 2, None, None),
@@ -408,13 +411,7 @@ def vis_hexane(
             )
 
         CC_pairs, sites_per_mol, CG_angle_idcs, cg_dihedral_idcs = definitions[cg_map]
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits],
-            axis=0,
-        )
+    ref_coords = _require_ref_coords(ref_coords, "vis_hexane")
 
     actual_nmol = config.get("nmol", nmol)
     plot_energy_and_kT(aux, line_locs, outpath)
@@ -757,16 +754,23 @@ def plot_helicity_gyration_ala15(
 
 
 def vis_capped_ala15(
-    traj_path, config, type="AT", name="Simulation", dataset=None, cg_map="hmerged"
+    traj_path,
+    config,
+    type="AT",
+    name="Simulation",
+    dataset=None,
+    cg_map="hmerged",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize ALA15 trajectory."""
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_capped_ala15")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     plot_energy_and_kT(aux, line_locs, outpath)
 
@@ -846,13 +850,7 @@ def vis_capped_ala15(
         pairs = mapping["pairs"]
         ca_indices = mapping["ca_indices"]
 
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits],
-            axis=0,
-        )
+    ref_coords = _require_ref_coords(ref_coords, "vis_capped_ala15")
 
     if len(phi_indices) > 0:
         ala2_dihedral_fn = init_dihedral_fn(disp_fn, [phi_indices, psi_indices])
@@ -876,12 +874,20 @@ def vis_capped_ala15(
 
 
 def vis_capped_pro(
-    traj_path, config, type="AT", name="Simulation", dataset=None, cg_map="hmerged"
+    traj_path,
+    config,
+    type="AT",
+    name="Simulation",
+    dataset=None,
+    cg_map="hmerged",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize PRO2 trajectory."""
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_capped_pro")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
 
@@ -890,14 +896,6 @@ def vis_capped_pro(
         phi_indices = [4, 6, 16, 18]
         psi_indices = [6, 16, 18, 20]
         pairs = [(4, 6), (6, 16), (16, 18)]
-        ref_coords = np.concatenate(
-            [
-                dataset.dataset_U["training"]["R"],
-                dataset.dataset_U["validation"]["R"],
-                dataset.dataset_U["testing"]["R"],
-            ],
-            axis=0,
-        )
     else:
         maps = {
             "hmerged": ([1, 3, 7, 8], [3, 7, 8, 10], [(1, 3), (3, 7), (7, 8)]),
@@ -911,15 +909,8 @@ def vis_capped_pro(
             "martini3": ([3, 1, 2, 0], [3, 1, 2, 0], [(0, 1), (1, 2), (1, 3)]),
         }
         phi_indices, psi_indices, pairs = maps[cg_map]
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits],
-            axis=0,
-        )
+    ref_coords = _require_ref_coords(ref_coords, "vis_capped_pro")
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     ala2_dihedral_fn = init_dihedral_fn(disp_fn, [phi_indices, psi_indices])
     AT_phi, AT_psi = ala2_dihedral_fn(ref_coords)
@@ -949,12 +940,20 @@ def vis_capped_pro(
 
 
 def vis_capped_gly(
-    traj_path, config, type="AT", name="Simulation", dataset=None, cg_map="hmerged"
+    traj_path,
+    config,
+    type="AT",
+    name="Simulation",
+    dataset=None,
+    cg_map="hmerged",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize GLY2 trajectory."""
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_capped_gly")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
 
@@ -963,14 +962,6 @@ def vis_capped_gly(
         phi_indices = [4, 6, 8, 11]
         psi_indices = [6, 8, 11, 13]
         pairs = [(4, 6), (6, 8), (8, 11)]
-        ref_coords = np.concatenate(
-            [
-                dataset.dataset_U["training"]["R"],
-                dataset.dataset_U["validation"]["R"],
-                dataset.dataset_U["testing"]["R"],
-            ],
-            axis=0,
-        )
     else:
         maps = {
             "hmerged": ([1, 3, 4, 5], [3, 4, 5, 7], [(1, 3), (3, 4), (4, 5)]),
@@ -982,15 +973,8 @@ def vis_capped_gly(
             "martini3": ([], [], [(0, 1), (1, 2)]),
         }
         phi_indices, psi_indices, pairs = maps[cg_map]
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits],
-            axis=0,
-        )
+    ref_coords = _require_ref_coords(ref_coords, "vis_capped_gly")
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     AT_dists = [compute_atom_distance(ref_coords, i, j, disp_fn) for i, j in pairs]
     Traj_dists = [compute_atom_distance(traj_coords, i, j, disp_fn) for i, j in pairs]
@@ -1019,12 +1003,20 @@ def vis_capped_gly(
 
 
 def vis_capped_thr(
-    traj_path, config, type="AT", name="Simulation", dataset=None, cg_map="hmerged"
+    traj_path,
+    config,
+    type="AT",
+    name="Simulation",
+    dataset=None,
+    cg_map="hmerged",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize THR2 trajectory."""
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_capped_thr")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
 
@@ -1033,14 +1025,6 @@ def vis_capped_thr(
         phi_indices = [4, 6, 16, 18]
         psi_indices = [6, 16, 18, 20]
         pairs = [(4, 6), (6, 16), (16, 18)]
-        ref_coords = np.concatenate(
-            [
-                dataset.dataset_U["training"]["R"],
-                dataset.dataset_U["validation"]["R"],
-                dataset.dataset_U["testing"]["R"],
-            ],
-            axis=0,
-        )
     else:
         maps = {
             "hmerged": ([1, 3, 5, 8], [3, 5, 8, 10], [(1, 3), (3, 5), (5, 8)]),
@@ -1054,15 +1038,8 @@ def vis_capped_thr(
             "martini3": ([3, 1, 2, 0], [3, 1, 2, 0], [(0, 1), (1, 2), (1, 3)]),
         }
         phi_indices, psi_indices, pairs = maps[cg_map]
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits],
-            axis=0,
-        )
+    ref_coords = _require_ref_coords(ref_coords, "vis_capped_thr")
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     ala2_dihedral_fn = init_dihedral_fn(disp_fn, [phi_indices, psi_indices])
     AT_phi, AT_psi = ala2_dihedral_fn(ref_coords)
@@ -1170,21 +1147,25 @@ def _plot_ca_rmsd_and_pair_distances(
 
 
 def vis_staticframe_protein(
-    traj_path, config, type="CG", name="Simulation", dataset=None, cg_map="CA"
+    traj_path,
+    config,
+    type="CG",
+    name="Simulation",
+    dataset=None,
+    cg_map="CA",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize StaticFrame protein trajectory with CA RMSD and pair distances."""
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_staticframe_protein")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
-    splits = ["training", "validation"]
-    if "testing" in dataset.cg_dataset_U:
-        splits.append("testing")
-    ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+    ref_coords = _require_ref_coords(ref_coords, "vis_staticframe_protein")
 
     # For CA map each residue contributes one bead, so all indices are CA beads.
     n_sites = min(ref_coords.shape[1], traj_coords.shape[1])
@@ -1215,6 +1196,9 @@ def vis_tip3p_water(
     name="Simulation",
     dataset=None,
     cg_map="UnitedAtom",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize TIP3P water with timeseries and RDF for both water mappings."""
     print(f"Visualizing {name} trajectory at {traj_path}")
@@ -1224,7 +1208,6 @@ def vis_tip3p_water(
             "TIP3P-water visualisation currently supports CG trajectories only."
         )
 
-    box = dataset.box
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
     traj_coords, aux = load_trajectory(traj_path)
@@ -1237,60 +1220,46 @@ def vis_tip3p_water(
             -1, traj_coords.shape[-2], traj_coords.shape[-1]
         )
 
-    box_arr = np.asarray(box)
+    ref_coords = _require_ref_coords(ref_coords, "vis_tip3p_water")
+    if ref_coords.ndim == 4:
+        ref_coords = ref_coords.reshape(
+            -1, ref_coords.shape[-2], ref_coords.shape[-1]
+        )
+
+    box_arr = np.asarray(dataset.box)
     box_len = float(box_arr[0, 0]) if box_arr.ndim == 2 else float(box_arr[0])
 
-    # Compute reference RDFs for both map definitions and compare to trajectory when possible.
-    map_variants = ["UnitedAtom", "HeavyAtom"]
-    original_map = cg_map
-    for map_name in map_variants:
-        dataset.coarse_grain(map=map_name)
-        splits = ["training", "validation"]
-        if "testing" in dataset.cg_dataset_U:
-            splits.append("testing")
-        ref_coords = np.concatenate(
-            [dataset.cg_dataset_U[s]["R"] for s in splits], axis=0
-        )
-        ref_coords = np.asarray(ref_coords)
-        if ref_coords.ndim == 4:
-            ref_coords = ref_coords.reshape(
-                -1, ref_coords.shape[-2], ref_coords.shape[-1]
-            )
+    ref_max_frames = 20000
+    traj_max_frames = 20000
+    ref_stride = max(1, int(np.ceil(ref_coords.shape[0] / ref_max_frames)))
+    traj_stride = max(1, int(np.ceil(traj_coords.shape[0] / traj_max_frames)))
 
-        ref_max_frames = 20000
-        traj_max_frames = 20000
-        ref_stride = max(1, int(np.ceil(ref_coords.shape[0] / ref_max_frames)))
-        traj_stride = max(1, int(np.ceil(traj_coords.shape[0] / traj_max_frames)))
+    ref_nm = ref_coords[::ref_stride] * box_len
+    trajectories = [ref_nm]
+    labels = [f"Reference ({cg_map})"]
 
-        ref_nm = ref_coords[::ref_stride] * box_len
-        trajectories = [ref_nm]
-        labels = [f"Reference ({map_name})"]
+    if traj_coords.shape[1] == ref_coords.shape[1]:
+        trajectories.append(traj_coords[::traj_stride] * box_len)
+        labels.append(f"{name} ({cg_map})")
 
-        if map_name == cg_map and traj_coords.shape[1] == ref_coords.shape[1]:
-            trajectories.append(traj_coords[::traj_stride] * box_len)
-            labels.append(f"{name} ({map_name})")
-
-        rdf_data, bead_combinations = calculate_rdf(
-            trajectories=trajectories,
-            bead_types=[1],
-            sites_per_mol=1,
-            box_length=box_len,
-            dr=0.01,
-            pair_batch_size=20_000,
-            frame_batch_size=512,
-        )
-        plot_rdf(
-            rdf_data=rdf_data,
-            bead_combinations=bead_combinations,
-            labels=labels,
-            output_prefix=os.path.join(outpath, f"tip3p_rdf_{map_name.lower()}"),
-            box_length=box_len,
-            mode="single",
-            save_pdf=True,
-        )
-
-    # Restore the originally requested map in the dataset object for consistency.
-    dataset.coarse_grain(map=original_map)
+    rdf_data, bead_combinations = calculate_rdf(
+        trajectories=trajectories,
+        bead_types=[1],
+        sites_per_mol=1,
+        box_length=box_len,
+        dr=0.01,
+        pair_batch_size=20_000,
+        frame_batch_size=512,
+    )
+    plot_rdf(
+        rdf_data=rdf_data,
+        bead_combinations=bead_combinations,
+        labels=labels,
+        output_prefix=os.path.join(outpath, f"tip3p_rdf_{cg_map.lower()}"),
+        box_length=box_len,
+        mode="single",
+        save_pdf=True,
+    )
 
 
 def vis_benzene_crystal(
@@ -1300,6 +1269,9 @@ def vis_benzene_crystal(
     name="Simulation",
     dataset=None,
     cg_map="three-site-adjacent",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize benzene crystal trajectory with 1-1 distances and RDF."""
     print(f"Visualizing {name} trajectory at {traj_path}")
@@ -1309,16 +1281,12 @@ def vis_benzene_crystal(
             "Benzene crystal visualisation currently supports CG trajectories only."
         )
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_benzene_crystal")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, shift_fn = periodic_displacement(box, True)
 
-    splits = ["training", "validation"]
-    if "testing" in dataset.cg_dataset_U:
-        splits.append("testing")
-    ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+    ref_coords = _require_ref_coords(ref_coords, "vis_benzene_crystal")
 
     # Flatten potential (n_chains, n_frames, n_atoms, 3) trajectories to frame-major 3D arrays.
     traj_coords = np.asarray(traj_coords)
@@ -1412,7 +1380,7 @@ def vis_benzene_crystal(
         f"dr={rdf_dr}"
     )
 
-    box_arr = np.asarray(box)
+    box_arr = np.asarray(dataset.box)
     box_len = float(box_arr[0, 0]) if box_arr.ndim == 2 else float(box_arr[0])
 
     # Coordinates are fractional; convert to nm for calculate_rdf.
@@ -1440,6 +1408,11 @@ def vis_benzene_crystal(
 
     # Additional RDF: molecule COMs (one bead per benzene) for three-site-adjacent mapping.
     if cg_map == "three-site-adjacent":
+        if shift_fn is None:
+            raise ValueError(
+                "vis_benzene_crystal requires shift_fn for COM mapping. "
+                "Pass shift_fn from scripts/run_simulation.py."
+            )
         from jax import numpy as jnp
         from cgbench.core.mapping import map_dataset as pbc_map_dataset
 
@@ -1506,6 +1479,9 @@ def vis_azobenzene(
     name="Simulation",
     dataset=None,
     cg_map="LVC=0.45",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize azobenzene trajectory (LVC=0.45 mapping).
 
@@ -1517,19 +1493,15 @@ def vis_azobenzene(
     """
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_azobenzene")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
 
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     plot_energy_and_kT(aux, line_locs, outpath)
 
-    splits = ["training", "validation"]
-    if "testing" in dataset.cg_dataset_U:
-        splits.append("testing")
-    ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+    ref_coords = _require_ref_coords(ref_coords, "vis_azobenzene")
 
     # Bond distributions
     bond_pairs = [(0, 5), (1, 2)]
@@ -1580,6 +1552,9 @@ def vis_3bpa(
     name="Simulation",
     dataset=None,
     cg_map="LVC=0.6",
+    disp_fn=None,
+    shift_fn=None,
+    ref_coords=None,
 ):
     """Visualize 3BPA trajectory.
 
@@ -1591,20 +1566,15 @@ def vis_3bpa(
     """
     print(f"Visualizing {name} trajectory at {traj_path}")
 
-    box = dataset.box
+    disp_fn = _require_displacement_fn(disp_fn, "vis_3bpa")
     outpath = prepare_output_dir(traj_path)
     line_locs = compute_line_locations(config)
 
     traj_coords, aux = load_trajectory(traj_path)
-    disp_fn, _ = periodic_displacement(box, True)
 
     plot_energy_and_kT(aux, line_locs, outpath)
 
-    # Reference coordinates from CG dataset splits
-    splits = ["training", "validation"]
-    if "testing" in dataset.cg_dataset_U:
-        splits.append("testing")
-    ref_coords = np.concatenate([dataset.cg_dataset_U[s]["R"] for s in splits], axis=0)
+    ref_coords = _require_ref_coords(ref_coords, "vis_3bpa")
 
     # d1: O (bead 2) <-> C5 (bead 5)
     # d2: C3 (bead 1) <-> N (bead 3)

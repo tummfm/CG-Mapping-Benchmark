@@ -1443,9 +1443,8 @@ class SplineModel:
         where *params* is a pytree as returned by :meth:`init_params` (or
         equivalently, the trained parameters loaded from a checkpoint).
 
-        Bonded terms (bonds, angles, dihedrals) are evaluated via a Python
-        loop over interaction instances, which JAX unrolls at trace time —
-        identical to the existing :func:`get_prior_energy_fn_template`.
+        Bonded terms (bonds, angles, dihedrals) are evaluated vectorized per
+        interaction type to keep JAX traces compact and reduce compile time.
 
         Non-bonded terms use the sparse neighbor list (``neighbor.idx`` of
         shape ``(n_particles, max_neighbors)`` with ``n_particles`` as the
@@ -1474,6 +1473,29 @@ class SplineModel:
         dihedral_terms = self._dihedral_terms  # list[(i, j, k, l, type_id)]
         nb_species_pairs = self._nb_species_pairs  # list[(si, sj)]
 
+        # Group bonded indices by spline type once to avoid per-term Python
+        # loops inside the traced energy function.
+        bond_idx_by_type = []
+        for tid in range(self._n_bond_types):
+            idx = [(i, j) for (i, j, t) in bond_terms if t == tid]
+            bond_idx_by_type.append(
+                jnp.asarray(idx, dtype=jnp.int32) if idx else jnp.zeros((0, 2), dtype=jnp.int32)
+            )
+
+        angle_idx_by_type = []
+        for tid in range(self._n_angle_types):
+            idx = [(i, j, k) for (i, j, k, t) in angle_terms if t == tid]
+            angle_idx_by_type.append(
+                jnp.asarray(idx, dtype=jnp.int32) if idx else jnp.zeros((0, 3), dtype=jnp.int32)
+            )
+
+        dihedral_idx_by_type = []
+        for tid in range(self._n_dihedral_types):
+            idx = [(i, j, k, l) for (i, j, k, l, t) in dihedral_terms if t == tid]
+            dihedral_idx_by_type.append(
+                jnp.asarray(idx, dtype=jnp.int32) if idx else jnp.zeros((0, 4), dtype=jnp.int32)
+            )
+
         species_jax = jnp.asarray(self._cg_species)
         n_particles = self._n_particles
         rcut = jnp.float32(self.rcut)
@@ -1489,22 +1511,28 @@ class SplineModel:
                 total = jnp.zeros((), dtype=jnp.float32)
 
                 # ---- bonded: bonds -----------------------------------------
-                for (i, j, tid) in bond_terms:
+                for tid, pair_idx in enumerate(bond_idx_by_type):
+                    if pair_idx.shape[0] == 0:
+                        continue
                     spline = MonotonicInterpolate(bond_x_grids_jax[tid], bond_params[tid])
-                    r = _bond_length(position, i, j)
-                    total = total + spline(r).astype(jnp.float32)
+                    r = jax.vmap(lambda p: _bond_length(position, p[0], p[1]))(pair_idx)
+                    total = total + jnp.sum(spline(r).astype(jnp.float32))
 
                 # ---- bonded: angles ----------------------------------------
-                for (i, j, k, tid) in angle_terms:
+                for tid, triplet_idx in enumerate(angle_idx_by_type):
+                    if triplet_idx.shape[0] == 0:
+                        continue
                     spline = MonotonicInterpolate(angle_x_grids_jax[tid], angle_params[tid])
-                    theta = _angle(position, i, j, k)
-                    total = total + spline(theta).astype(jnp.float32)
+                    theta = jax.vmap(lambda p: _angle(position, p[0], p[1], p[2]))(triplet_idx)
+                    total = total + jnp.sum(spline(theta).astype(jnp.float32))
 
                 # ---- bonded: dihedrals -------------------------------------
-                for (i, j, k, l, tid) in dihedral_terms:
+                for tid, quad_idx in enumerate(dihedral_idx_by_type):
+                    if quad_idx.shape[0] == 0:
+                        continue
                     spline = MonotonicInterpolate(dihedral_x_grids_jax[tid], dihedral_params[tid])
-                    phi = _dihedral(position, i, j, k, l)
-                    total = total + spline(phi).astype(jnp.float32)
+                    phi = jax.vmap(lambda p: _dihedral(position, p[0], p[1], p[2], p[3]))(quad_idx)
+                    total = total + jnp.sum(spline(phi).astype(jnp.float32))
 
                 # ---- non-bonded via sparse neighbor list (COO format) ------
                 # neighbor.idx has shape (2, max_edges): row 0 = senders,
