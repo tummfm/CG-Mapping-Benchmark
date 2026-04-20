@@ -551,8 +551,15 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
             t_total=config["t_total"],
         )
 
+        print("Compiling simulation (JIT) …")
+        t0_compile = time.time()
+        traj_generator_compiled = traj_generator.lower(None, reference_state).compile()
+        t_compile = time.time() - t0_compile
+        print(f"JIT compilation took {t_compile:.1f} s")
+
         start_time = time.time()
-        traj_state = traj_generator(None, reference_state)
+        traj_state = traj_generator_compiled(None, reference_state)
+        jax.block_until_ready(traj_state)
         elapsed_time = time.time() - start_time
 
         print(
