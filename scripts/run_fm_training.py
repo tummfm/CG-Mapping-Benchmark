@@ -47,6 +47,9 @@ parser.add_argument("--num-epochs", type=int, default=None)
 parser.add_argument("--epochs", type=int, default=None)
 parser.add_argument("--decay-rate", type=float, default=None)
 parser.add_argument("--optimizer", type=str, default=None)
+parser.add_argument("--grad-clip", type=float, default=10.0,
+                    help="Global gradient norm clip (default 10.0, 0 to disable).")
+parser.add_argument("--disable-cueq", action="store_true", help="Disable cueq (MACE only, overrides --use-so3)")
 parser.add_argument(
     "--prior",
     type=str,
@@ -118,7 +121,7 @@ def _save_params(path, params):
         pickle.dump(cpu_params, f)
 
 
-def init_optimizer(config, dataset_dict):
+def init_optimizer(config, dataset_dict, grad_clip: float = 0.0):
     num_samples = 1
     if "U" in dataset_dict["training"]:
         num_samples = dataset_dict["training"]["U"].shape[0]
@@ -137,7 +140,10 @@ def init_optimizer(config, dataset_dict):
         config["optimizer"]["lr_decay"],
     )
 
-    transforms = [
+    transforms = []
+    if grad_clip > 0.0:
+        transforms.append(optax.clip_by_global_norm(grad_clip))
+    transforms += [
         optax.scale_by_adam(
             b1=config["optimizer"]["optimizer_kwargs"]["b1"],
             b2=config["optimizer"]["optimizer_kwargs"]["b2"],
@@ -326,7 +332,7 @@ nbrs_init, (max_neighbors, max_edges, avg_num_neighbors) = (
         box_key="box" if box is not None else None,
         format=partition.Sparse,
         batch_size=100,
-        capacity_multiplier=1.4,
+        capacity_multiplier=2.0,
     )
 )
 
@@ -338,6 +344,7 @@ if args.verbose:
 species_init = jnp.asarray(dataset_dict["training"]["species"][0])
 r_init = jnp.asarray(dataset_dict["training"]["R"][0])
 mask_init = jnp.asarray(dataset_dict["training"]["mask"][0])
+enable_cueq = not args.disable_cueq and MODEL_CONFIG.get("use_so3", False)
 
 if args.model == "mace":
     mace_cfg = build_mace_config(MODEL_CONFIG, use_so3=args.use_so3)
@@ -351,7 +358,7 @@ if args.model == "mace":
         n_species=100, # hardcoded n_species
         per_particle=False,
         use_so3=MODEL_CONFIG.get("use_so3", False),
-        enable_cueq=not MODEL_CONFIG.get("use_so3", False),
+        enable_cueq=enable_cueq,
     )
 elif args.model == "nequip":
     init_fn, gnn_energy_fn = init_nequip_model(
@@ -452,7 +459,7 @@ if train_config["swa"]["enabled"]:
 else:
     print("[SWA] Disabled")
 
-optimizer_fm = init_optimizer(train_config, dataset_dict)
+optimizer_fm = init_optimizer(train_config, dataset_dict, grad_clip=args.grad_clip)
 
 trainer_fm = trainers.ForceMatching(
     init_params,
@@ -517,6 +524,16 @@ with open(f"{output_dir}/train_config.json", "w") as f:
     )
 
 from cgbench.plotting.training import plot_convergence, plot_predictions
+
+if args.model == "spline":
+    from cgbench.plotting.priors import plot_splines
+    from cgbench.core.prior import BoltzmannPrior
+    _bi_ref = BoltzmannPrior(data, T=300.0)
+    _bi_priors_ref = _bi_ref.compute_all_priors(split="training", cg=True)
+    _spline_plot = plot_splines(_spline_model, selected_eval_params, output_dir,
+                                bi_priors=_bi_priors_ref)
+    if _spline_plot:
+        print(f"[Spline] Saved learned spline plot to {_spline_plot}")
 
 plot_convergence(trainer_fm, output_dir)
 

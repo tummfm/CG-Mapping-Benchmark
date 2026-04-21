@@ -388,7 +388,9 @@ def init_simulator(
 
     quantities = {
         "kT": custom_quantity.temperature,
-        "epot": custom_quantity.energy_wrapper(lambda _: energy_fn_impl),
+        "epot": custom_quantity.energy_wrapper(lambda _: energy_fn_impl),        
+        "force": custom_quantity.force_wrapper(lambda _: energy_fn_impl),
+        "etot": custom_quantity.total_energy_wrapper(lambda _: energy_fn_impl),
     }
 
     traj_gen = sampling.trajectory_generator_init(

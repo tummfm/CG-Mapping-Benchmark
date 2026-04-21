@@ -91,7 +91,7 @@ MD_DATASET_PATHS = {
     "cath_test": {
         "path": f"{BASE_DATASET_PATH}/cath_10.npz"
     },
-    "3bpa": {
+    "3bpa": { # unbiased
         "path": f"{BASE_DATASET_PATH}/3BPA/3bpa.npz",
         "config": f"{BASE_DATASET_PATH}/3BPA/bpa_prod_new.gro",
         "topology": f"{BASE_DATASET_PATH}/3BPA/bpa_prod_new.tpr",
@@ -101,13 +101,13 @@ MD_DATASET_PATHS = {
         "path": f"{BASE_DATASET_PATH}/3BPA_biased/3bpa_biased.npz",
         "config": f"{BASE_DATASET_PATH}/3BPA_biased/opes_bpa.gro",
         "topology": f"{BASE_DATASET_PATH}/3BPA_biased/opes_bpa.tpr",
-        "traj": f"{BASE_DATASET_PATH}/3BPA_biased/opes_bpa.trr",  # trr contains both coordinates and forces
+        "traj": f"{BASE_DATASET_PATH}/3BPA_biased/recomputed_forces.trr",  # trr contains both coordinates and forces
     },
     "azobenzene_biased": {
         "path": f"{BASE_DATASET_PATH}/Azobenzene_biased/azobenzene_biased.npz",
         "config": f"{BASE_DATASET_PATH}/Azobenzene_biased/azo_prod.gro",
         "topology": f"{BASE_DATASET_PATH}/Azobenzene_biased/opes_azo.tpr",
-        "traj": f"{BASE_DATASET_PATH}/Azobenzene_biased/opes_azo.trr",  # trr contains both coordinates and forces
+        "traj": f"{BASE_DATASET_PATH}/Azobenzene_biased/recomputed_forces.trr",  # trr contains both coordinates and forces
     },
 }
 STATIC_FRAME_DATASET_PATHS = {
@@ -179,8 +179,14 @@ DEFAULT_TRAIN_CONFIG = {
     "batch_size": 32,
     "init_lr": 0.001,
     "num_epochs": 5,
-    "decay_rate": 0.95, 
+    "decay_rate": 0.95,
     "optimizer": "adam+decay",
+    "cache": 100,
+    "lr_schedule": "exponential",
+    "weight_decay": 0.0,
+    "optimizer_kwargs": {"b1": 0.9, "b2": 0.999, "eps": 1e-8},
+    "gamma_F": 1.0,
+    "grad_clip": 10.0,
 }
 
 DEFAULT_FINETUNE_CONFIG = {
@@ -189,6 +195,12 @@ DEFAULT_FINETUNE_CONFIG = {
     "num_epochs": 100,
     "decay_rate": 0.95,
     "optimizer": "adam+decay",
+    "cache": 100,
+    "lr_schedule": "exponential",
+    "weight_decay": 0.0,
+    "optimizer_kwargs": {"b1": 0.9, "b2": 0.999, "eps": 1e-8},
+    "gamma_F": 1.0,
+    "grad_clip": 10.0,
 }
 
 
