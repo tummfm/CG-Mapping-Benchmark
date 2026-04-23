@@ -26,7 +26,7 @@ parser.add_argument(
     "--model",
     type=str,
     required=True,
-    choices=["mace", "nequip", "spline"],
+    choices=["mace", "nequip"],
     help="Model backend to train.",
 )
 parser.add_argument("--device", type=str, help="GPU or MIG UUID")
@@ -58,40 +58,14 @@ parser.add_argument(
     help=(
         "Add a fixed bonded prior to the energy function (CG only). "
         "'bi' = tabulated Boltzmann-inversion PMF; "
-        "'1dfunc' = fitted harmonic/Fourier prior. "
-        "Incompatible with --model spline."
+        "'1dfunc' = fitted harmonic/Fourier prior."
     ),
-)
-# Spline-specific arguments (only used when --model spline)
-parser.add_argument(
-    "--n-knots-nb",
-    type=int,
-    default=20,
-    help="Number of knots for non-bonded splines (spline model only).",
-)
-parser.add_argument(
-    "--n-knots-bond",
-    type=int,
-    default=20,
-    help="Number of knots for bond splines (spline model only).",
-)
-parser.add_argument(
-    "--n-knots-angle",
-    type=int,
-    default=20,
-    help="Number of knots for angle splines (spline model only).",
-)
-parser.add_argument(
-    "--n-knots-dihedral",
-    type=int,
-    default=20,
-    help="Number of knots for dihedral splines (spline model only).",
 )
 args = parser.parse_args()
 
 configure_runtime_environment(
     device=args.device,
-    xla_mem_fraction="0.97",
+    xla_mem_fraction="0.7",
 )
 
 import cloudpickle as pickle
@@ -105,7 +79,6 @@ from chemtrain.data import preprocessing
 from cgbench.core.config import (
     DEFAULT_MACE_CONFIG,
     DEFAULT_NEQUIP_CONFIG,
-    DEFAULT_SPLINE_CONFIG,
     DEFAULT_TRAIN_CONFIG,
 )
 
@@ -164,10 +137,8 @@ def init_optimizer(config, dataset_dict, grad_clip: float = 0.0):
 
 if args.model == "mace":
     MODEL_CONFIG = copy.deepcopy(DEFAULT_MACE_CONFIG)
-elif args.model == "nequip":
+else:  # nequip
     MODEL_CONFIG = copy.deepcopy(DEFAULT_NEQUIP_CONFIG)
-else:  # spline
-    MODEL_CONFIG = copy.deepcopy(DEFAULT_SPLINE_CONFIG)
 TRAIN_CONFIG = copy.deepcopy(DEFAULT_TRAIN_CONFIG)
 
 if args.batch_size is not None:
@@ -196,13 +167,6 @@ MODEL_CONFIG["CG_map"] = args.cgmap
 MODEL_CONFIG["type"] = "CG" if MODEL_CONFIG["CG_map"] != "AT" else "AT"
 if args.model == "mace":
     MODEL_CONFIG["use_so3"] = bool(args.use_so3)
-
-if args.model == "spline" and args.prior is not None:
-    raise ValueError(
-        "--prior is incompatible with --model spline; the spline IS the model."
-    )
-if args.model == "spline" and MODEL_CONFIG["type"] == "AT":
-    raise ValueError("--model spline requires a CG map (--cgmap must not be 'AT').")
 
 MODEL_CONFIG["mol"], data, used_prestrided_cache = load_training_dataset(
     mol=MODEL_CONFIG["mol"],
@@ -252,11 +216,9 @@ if model_tag == "mace":
         f"maxL={MODEL_CONFIG.get('max_ell')}_"
         f"eq={use_so3_tag}"
     )
-elif model_tag == "spline":
-    arch_tag = (
-        f"_nb={args.n_knots_nb}_bond={args.n_knots_bond}"
-        f"_ang={args.n_knots_angle}_dih={args.n_knots_dihedral}"
-    )
+    if args.disable_cueq:
+        arch_tag += "_no_cueq"
+    
 output_dir = (
     f"outputs/Model={model_tag}/"
     f"{MODEL_CONFIG['mol'].capitalize()}_"
@@ -344,7 +306,9 @@ if args.verbose:
 species_init = jnp.asarray(dataset_dict["training"]["species"][0])
 r_init = jnp.asarray(dataset_dict["training"]["R"][0])
 mask_init = jnp.asarray(dataset_dict["training"]["mask"][0])
-enable_cueq = not args.disable_cueq and MODEL_CONFIG.get("use_so3", False)
+enable_cueq = not args.disable_cueq
+if args.use_so3:
+    enable_cueq = False
 
 if args.model == "mace":
     mace_cfg = build_mace_config(MODEL_CONFIG, use_so3=args.use_so3)
@@ -360,7 +324,7 @@ if args.model == "mace":
         use_so3=MODEL_CONFIG.get("use_so3", False),
         enable_cueq=enable_cueq,
     )
-elif args.model == "nequip":
+else:  # nequip
     init_fn, gnn_energy_fn = init_nequip_model(
         displacement_fn,
         MODEL_CONFIG["r_cutoff"],
@@ -381,36 +345,6 @@ elif args.model == "nequip":
 
     key = random.PRNGKey(MODEL_CONFIG["PRNGKey_seed"])
     init_params = init_fn(key, r_init, nbrs_init, species=species_init, mask=mask_init)
-else:  # spline
-    import cloudpickle as _cpickle
-    from cgbench.core.prior import SplineModel
-
-    _r_onset = MODEL_CONFIG.get("r_onset_fraction", 0.9) * MODEL_CONFIG["r_cutoff"]
-    _spline_model = SplineModel(
-        dataset=data,
-        rcut=MODEL_CONFIG["r_cutoff"],
-        n_knots_nb=args.n_knots_nb,
-        n_knots_bond=args.n_knots_bond,
-        n_knots_angle=args.n_knots_angle,
-        n_knots_dihedral=args.n_knots_dihedral,
-        r_onset=_r_onset,
-    )
-    init_params = _spline_model.init_params()
-    model_energy_fn_template = _spline_model.get_energy_fn_template(displacement_fn)
-
-    _spline_pkl = f"{output_dir}/spline_model.pkl"
-    _spline_model.save_data(_spline_pkl)
-    print(f"[Spline] Saved model topology/grids to {_spline_pkl}")
-
-    MODEL_CONFIG.update(
-        {
-            "n_knots_nb": args.n_knots_nb,
-            "n_knots_bond": args.n_knots_bond,
-            "n_knots_angle": args.n_knots_angle,
-            "n_knots_dihedral": args.n_knots_dihedral,
-            "r_onset": _r_onset,
-        }
-    )
 
 if prior_energy_fn_template is not None:
     def energy_fn_template(params):
@@ -524,16 +458,6 @@ with open(f"{output_dir}/train_config.json", "w") as f:
     )
 
 from cgbench.plotting.training import plot_convergence, plot_predictions
-
-if args.model == "spline":
-    from cgbench.plotting.priors import plot_splines
-    from cgbench.core.prior import BoltzmannPrior
-    _bi_ref = BoltzmannPrior(data, T=300.0)
-    _bi_priors_ref = _bi_ref.compute_all_priors(split="training", cg=True)
-    _spline_plot = plot_splines(_spline_model, selected_eval_params, output_dir,
-                                bi_priors=_bi_priors_ref)
-    if _spline_plot:
-        print(f"[Spline] Saved learned spline plot to {_spline_plot}")
 
 plot_convergence(trainer_fm, output_dir)
 

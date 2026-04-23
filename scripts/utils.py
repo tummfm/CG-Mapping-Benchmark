@@ -43,12 +43,11 @@ def load_json_file(path: str, label: str = "JSON") -> dict[str, Any]:
 
 
 def load_model_artifacts(model_path: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    """Load config.json and train_config.json from a trained model directory."""
+    """Load config.json and (optionally) train_config.json from a trained model directory."""
     base_dir = os.path.dirname(os.path.abspath(model_path))
     model_config = load_json_file(os.path.join(base_dir, "config.json"), "Config")
-    train_config = load_json_file(
-        os.path.join(base_dir, "train_config.json"), "Train config"
-    )
+    train_config_path = os.path.join(base_dir, "train_config.json")
+    train_config = load_json_file(train_config_path, "Train config") if os.path.exists(train_config_path) else {}
     return base_dir, model_config, train_config
 
 

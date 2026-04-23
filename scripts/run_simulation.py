@@ -104,6 +104,8 @@ if "model" not in MODEL_CONFIG:
     )
 
 backend = str(MODEL_CONFIG["model"]).strip().lower()
+if backend.startswith("spline"):
+    backend = "spline"
 if backend not in {"mace", "nequip", "spline"}:
     raise ValueError(
         f"Invalid config.json model='{MODEL_CONFIG['model']}'. Expected 'mace', 'nequip', or 'spline'."
@@ -142,14 +144,11 @@ splits = ["training", "validation"]
 if MODEL_CONFIG["type"] == "AT":
     if hasattr(data, "load_traj"):
         data.load_traj()
-
     dataset_dict = data.dataset_U
     masses = data.masses
     species = data.species
-
 else:
     data.coarse_grain(MODEL_CONFIG["CG_map"])
-
     dataset_dict = data.cg_dataset_U
     masses = data.cg_masses
     species = data.cg_species
@@ -193,7 +192,7 @@ nbrs_init, (max_neighbors, max_edges, avg_num_neighbors) = (
         box_key="box" if box is not None else None,
         format=partition.Sparse,
         batch_size=100,
-        capacity_multiplier=1.4,
+        capacity_multiplier=2.0,
     )
 )
 
@@ -310,7 +309,11 @@ if args.verbose:
 
 if not os.path.exists(model_path):
     raise FileNotFoundError(f"Model file {model_path} not found.")
-energy_params = onp.load(model_path, allow_pickle=True)
+if backend == "spline":
+    with open(model_path, "rb") as _pf:
+        energy_params = _cpickle.load(_pf)
+else:
+    energy_params = onp.load(model_path, allow_pickle=True)
 energy_params = tree_util.tree_map(jnp.asarray, energy_params)
 energy_fn = energy_fn_template(energy_params)
 
@@ -338,7 +341,7 @@ def init_simulator(
     if "box" in dataset_dict["validation"]:
         _, shift_fn = space.periodic_general(
             dataset_dict["validation"]["box"][0],
-            fractional_coordinates=True,
+            fractional_coordinates=fractional,
         )
     else:
         _, shift_fn = space.free()
