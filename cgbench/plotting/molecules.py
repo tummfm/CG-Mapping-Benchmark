@@ -416,20 +416,6 @@ def vis_hexane(
     actual_nmol = config.get("nmol", nmol)
     plot_energy_and_kT(aux, line_locs, outpath)
 
-    if "epot" in aux:
-        epot = aux["epot"]
-        if np.any(epot > 1000):
-            first_explosion = np.where(epot > 1000)[0][0]
-            traj_coords = traj_coords[:first_explosion]
-            aux = {
-                k: v[:first_explosion]
-                for k, v in aux.items()
-                if isinstance(v, (np.ndarray, list))
-            }
-            print(
-                f"Energy exceeded 10^4 at frame {first_explosion}, truncating trajectory."
-            )
-
     CC_all = []
     Dihedrals_idcs_all = []
     Angles_idcs_all = []

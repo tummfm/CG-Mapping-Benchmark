@@ -373,7 +373,8 @@ def plot_splines(
 
 _MULTI_LINESTYLES = ["-", "--", "-."]
 
-_BI_X_KEY = {"bonds": "r_grid", "angles": "theta_grid", "dihedrals": "phi_grid"}
+_BI_X_KEY = {"bonds": "r_grid", "angles": "theta_grid", "dihedrals": "phi_grid",
+             "non_bonded": "r_grid"}
 
 
 def _overlay_bi_reference(ax, key, bi_priors, labels, color_cycle, n_types):

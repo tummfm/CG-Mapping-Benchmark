@@ -670,6 +670,181 @@ class BoltzmannPrior:
             }
         return results
 
+    def compute_nb_priors(
+        self,
+        split: str = "training",
+        cg: bool = True,
+        n_bins: int = 150,
+        r_max: float | None = None,
+        exclude_bonds: bool = True,
+        max_frames: int = 2000,
+    ) -> dict:
+        """Compute non-bonded PMFs via RDF Boltzmann inversion.
+
+        For each canonical species pair (s_i ≤ s_j), the radial distribution
+        function g(r) is estimated from the trajectory and inverted:
+
+            PMF(r) = -k_B T ln g(r) + const
+
+        The standard RDF normalisation is applied so that g(r) → 1 at large r.
+        Bonded 1-2 neighbours are optionally excluded to avoid the bonded peak
+        distorting the non-bonded PMF.
+
+        Args:
+            split:          Dataset split to use.
+            cg:             Use CG positions and species when ``True``.
+            n_bins:         Number of radial histogram bins.
+            r_max:          Upper distance limit in nm.  Defaults to half the
+                            smallest box side length (the maximum unambiguous
+                            range for a PBC system).
+            exclude_bonds:  Exclude 1-2 bonded pairs from the histogram.
+            max_frames:     Maximum number of frames to use (subsampled
+                            uniformly if the dataset is larger).
+
+        Returns:
+            Dict keyed by canonical species pairs ``(s_i, s_j)`` with
+            ``s_i ≤ s_j``.  Each value contains:
+
+            * ``'r_grid'`` - bin centres in nm.
+            * ``'U'``      - PMF in kJ/mol, min-shifted to 0 (NaN where g = 0).
+            * ``'g'``      - radial distribution function g(r).
+        """
+        positions = np.asarray(self._positions(split, cg))   # (F, N, 3)
+        species = self._species_array(cg)
+
+        if species is None:
+            return {}
+
+        n_frames_total, n_atoms, _ = positions.shape
+
+        # Box matrix (3, 3) for minimum-image convention
+        box = getattr(self.dataset, "box", None)
+        if box is None:
+            return {}
+        box_mat = np.asarray(box, dtype=np.float64)           # (3, 3)
+        box_inv = np.linalg.inv(box_mat)
+        V = float(abs(np.linalg.det(box_mat)))
+
+        # Default r_max = half the shortest box side
+        if r_max is None:
+            side_lengths = np.linalg.norm(box_mat, axis=1)
+            r_max = float(0.5 * side_lengths.min())
+
+        # Subsample frames
+        if n_frames_total > max_frames:
+            idx = np.round(np.linspace(0, n_frames_total - 1, max_frames)).astype(int)
+            positions = positions[idx]
+        n_frames_used = positions.shape[0]
+
+        # Build exclusion set: 1-2 bonds, 1-3 angle partners, 1-4 dihedral partners
+        excluded: set[tuple[int, int]] = set()
+        if exclude_bonds:
+            bonds = self._bonds(cg)
+            if bonds is not None and len(bonds) > 0:
+                for i, j in bonds:
+                    a, b = int(i), int(j)
+                    excluded.add((min(a, b), max(a, b)))
+            angles = self._angles(cg)
+            if angles is not None and len(angles) > 0:
+                for i, j, k in angles:
+                    a, b = int(i), int(k)
+                    excluded.add((min(a, b), max(a, b)))
+            dihedrals = self._dihedrals(cg)
+            if dihedrals is not None and len(dihedrals) > 0:
+                for i, j, k, l in dihedrals:
+                    a, b = int(i), int(l)
+                    excluded.add((min(a, b), max(a, b)))
+
+        # Identify unique canonical species pairs and per-species atom lists
+        unique_sp = sorted(set(int(s) for s in species))
+        sp_atoms: dict[int, np.ndarray] = {
+            s: np.where(species == s)[0] for s in unique_sp
+        }
+        pairs: list[tuple[int, int]] = [
+            (si, sj)
+            for idx_si, si in enumerate(unique_sp)
+            for sj in unique_sp[idx_si:]
+        ]
+
+        edges = np.linspace(0.0, r_max, n_bins + 1)
+        bin_centres = 0.5 * (edges[:-1] + edges[1:])
+        dr = edges[1] - edges[0]
+
+        counts: dict[tuple, np.ndarray] = {p: np.zeros(n_bins) for p in pairs}
+
+        for R in positions:
+            # Fractional coordinates for minimum-image arithmetic
+            R_frac = R @ box_inv                              # (N, 3)
+
+            for si, sj in pairs:
+                atoms_i = sp_atoms[si]
+                atoms_j = sp_atoms[sj]
+                like = (si == sj)
+
+                # Build index pairs (i < j for like species to avoid double-count)
+                if like:
+                    ii, jj = np.triu_indices(len(atoms_i), k=1)
+                    gi = atoms_i[ii]
+                    gj = atoms_i[jj]
+                else:
+                    gi_idx, gj_idx = np.meshgrid(
+                        np.arange(len(atoms_i)),
+                        np.arange(len(atoms_j)),
+                        indexing="ij",
+                    )
+                    gi = atoms_i[gi_idx.ravel()]
+                    gj = atoms_j[gj_idx.ravel()]
+
+                if len(gi) == 0:
+                    continue
+
+                # Minimum-image distances
+                dq = R_frac[gi] - R_frac[gj]               # (P, 3)
+                dq -= np.round(dq)
+                dr_cart = dq @ box_mat                       # (P, 3)
+                r = np.linalg.norm(dr_cart, axis=-1)        # (P,)
+
+                # Apply exclusions
+                if excluded:
+                    keep = np.array([
+                        (min(int(a), int(b)), max(int(a), int(b))) not in excluded
+                        for a, b in zip(gi, gj)
+                    ])
+                    r = r[keep]
+
+                h, _ = np.histogram(r, bins=edges)
+                counts[(si, sj)] += h.astype(float)
+
+        # Normalise to g(r) and invert
+        results: dict = {}
+        shell_vols = (4.0 / 3.0) * np.pi * (edges[1:] ** 3 - edges[:-1] ** 3)
+
+        for si, sj in pairs:
+            n_i = len(sp_atoms[si])
+            n_j = len(sp_atoms[sj])
+            like = (si == sj)
+
+            # Expected counts in each shell for an ideal gas
+            # For like pairs we summed i<j pairs, so n_pairs = n_i*(n_i-1)/2
+            if like:
+                rho_ideal = (n_i * (n_i - 1) / 2.0) / V
+            else:
+                rho_ideal = (n_i * n_j) / V
+
+            ideal = rho_ideal * shell_vols * n_frames_used
+            with np.errstate(divide="ignore", invalid="ignore"):
+                g = np.where(ideal > 0, counts[(si, sj)] / ideal, 0.0)
+
+            valid = g > 0.0
+            U = np.full(n_bins, np.nan)
+            U[valid] = -self.kT * np.log(g[valid])
+            U -= np.nanmin(U[valid]) if np.any(valid) else 0.0
+
+            key = (si, sj)
+            results[key] = {"r_grid": bin_centres, "U": U, "g": g}
+
+        return results
+
     def compute_all_priors(
         self,
         split: str = "training",
@@ -678,20 +853,27 @@ class BoltzmannPrior:
         bond_jacobian: str | None = None,
         angle_jacobian: str | None = None,
         group_by_species: bool = True,
+        nb_r_max: float | None = None,
+        nb_bins: int = 150,
+        nb_max_frames: int = 2000,
     ) -> dict:
-        """Compute all bonded priors (bonds, angles, dihedrals) at once.
+        """Compute all bonded and non-bonded priors at once.
 
         Args:
             split:            Dataset split.
             cg:               Use CG topology when ``True``.
-            n_bins:           Number of histogram bins for all terms.
+            n_bins:           Number of histogram bins for bonded terms.
             bond_jacobian:    Jacobian correction for bonds (default ``None``).
             angle_jacobian:   Jacobian correction for angles (default ``None``).
-            group_by_species: Pool interactions of the same species combination
-                              (default ``True``).
+            group_by_species: Pool interactions of the same species combination.
+            nb_r_max:         Upper distance limit for non-bonded RDF (nm).
+                              Defaults to half the shortest box side.
+            nb_bins:          Histogram bins for the non-bonded RDF.
+            nb_max_frames:    Frame budget for RDF accumulation.
 
         Returns:
-            Dict with keys ``'bonds'``, ``'angles'``, ``'dihedrals'``.
+            Dict with keys ``'bonds'``, ``'angles'``, ``'dihedrals'``,
+            ``'non_bonded'``.
         """
         return {
             "bonds": self.compute_bond_priors(
@@ -702,6 +884,10 @@ class BoltzmannPrior:
             ),
             "dihedrals": self.compute_dihedral_priors(
                 split, cg, n_bins, group_by_species
+            ),
+            "non_bonded": self.compute_nb_priors(
+                split, cg, n_bins=nb_bins, r_max=nb_r_max,
+                max_frames=nb_max_frames,
             ),
         }
 
@@ -1162,11 +1348,16 @@ class SplineModel:
         T: float = 300.0,
         split: str = "training",
         r_onset: float | None = None,
+        percentile_lo: float = 1.0,
+        percentile_hi: float = 99.0,
+        max_frames_nb: int = 500,
     ):
         self.rcut = float(rcut)
         self.r_onset = float(r_onset if r_onset is not None else 0.9 * rcut)
         self.n_knots_nb = max(n_knots_nb, self._MIN_KNOTS)
         self.n_knots_bond = max(n_knots_bond, self._MIN_KNOTS)
+        self.percentile_lo = float(percentile_lo)
+        self.percentile_hi = float(percentile_hi)
         self.n_knots_angle = max(n_knots_angle, self._MIN_KNOTS)
         self.n_knots_dihedral = max(n_knots_dihedral, self._MIN_KNOTS)
 
@@ -1191,11 +1382,22 @@ class SplineModel:
         dihedral_index = dihedral_index if dihedral_index is not None else np.empty((0, 4), dtype=int)
 
         displacement_fn = dataset.displacement_fn_X
+        self.max_frames_nb = int(max_frames_nb)
 
         # ---- training data for range estimation ----------------------------
         avail = list(dataset.cg_dataset_X.keys())
         use_split = split if split in avail else avail[0]
-        R_split = jnp.asarray(dataset.cg_dataset_X[use_split]["R"])  # (F, N, 3)
+        _R_all = jnp.asarray(dataset.cg_dataset_X[use_split]["R"])  # (F, N, 3)
+
+        # Subsample for bonded range estimation (4x the NB budget)
+        _max_bonded_frames = 4 * self.max_frames_nb
+        if _R_all.shape[0] > _max_bonded_frames:
+            _bi = jnp.round(
+                jnp.linspace(0, _R_all.shape[0] - 1, _max_bonded_frames)
+            ).astype(int)
+            R_split = _R_all[_bi]
+        else:
+            R_split = _R_all
 
         # ---- bond terms ----------------------------------------------------
         bond_type_map: dict = {}
@@ -1222,8 +1424,8 @@ class SplineModel:
 
             for tid, cols in enumerate(type_bond_col_indices):
                 bl_type = bl_all[:, cols].ravel()
-                r_lo = float(np.percentile(bl_type, 1))
-                r_hi = float(np.percentile(bl_type, 99))
+                r_lo = float(np.percentile(bl_type, self.percentile_lo))
+                r_hi = float(np.percentile(bl_type, self.percentile_hi))
                 bond_x_grids_np[tid] = np.linspace(r_lo, r_hi, self.n_knots_bond)
 
             for bi, (i, j) in enumerate(bond_index):
@@ -1255,8 +1457,8 @@ class SplineModel:
 
             for tid, cols in enumerate(type_angle_col_indices):
                 ang_type = ang_all[:, cols].ravel()
-                a_lo = max(0.0, float(np.percentile(ang_type, 1)))
-                a_hi = min(float(np.pi), float(np.percentile(ang_type, 99)))
+                a_lo = max(0.0, float(np.percentile(ang_type, self.percentile_lo)))
+                a_hi = min(float(np.pi), float(np.percentile(ang_type, self.percentile_hi)))
                 angle_x_grids_np[tid] = np.linspace(a_lo, a_hi, self.n_knots_angle)
 
             for ai, (i, j, k) in enumerate(angle_index):
@@ -1296,12 +1498,80 @@ class SplineModel:
         # ---- non-bonded types (all unique canonical species pairs) ---------
         unique_species = sorted(set(int(s) for s in cg_species))
         nb_species_pairs: list = []
-        nb_x_grids_list: list = []
 
+        # Exclusion matrix: 1-2 (bonds), 1-3 (angles), 1-4 (dihedrals)
+        nb_excluded = np.zeros((n_particles, n_particles), dtype=bool)
+        for i, j in bond_index:
+            nb_excluded[int(i), int(j)] = True
+            nb_excluded[int(j), int(i)] = True
+        for i, j, k in angle_index:
+            nb_excluded[int(i), int(k)] = True
+            nb_excluded[int(k), int(i)] = True
+        for i, j, k, l in dihedral_index:
+            nb_excluded[int(i), int(l)] = True
+            nb_excluded[int(l), int(i)] = True
+
+        # Per-species atom index lists
+        cg_species_np = np.asarray(cg_species)
+        sp_atoms_nb = {s: np.where(cg_species_np == s)[0] for s in unique_species}
+
+        # Sample a subset of training frames for distance estimation
+        R_nb = np.asarray(_R_all)
+        n_frames_total = R_nb.shape[0]
+        if n_frames_total > self.max_frames_nb:
+            _fi = np.round(np.linspace(0, n_frames_total - 1, self.max_frames_nb)).astype(int)
+            R_nb = R_nb[_fi]
+
+        # Box for minimum-image convention
+        _box = getattr(dataset, "box", None)
+        _box_mat = np.asarray(_box, dtype=np.float64) if _box is not None else None
+        _box_inv = np.linalg.inv(_box_mat) if _box_mat is not None else None
+
+        # Accumulate non-bonded distances within rcut per species pair
+        _nb_samples: dict = {
+            (si, sj): []
+            for idx_si, si in enumerate(unique_species)
+            for sj in unique_species[idx_si:]
+        }
+        for R_frame in R_nb:
+            R_f64 = R_frame.astype(np.float64)
+            R_frac = R_f64 @ _box_inv if _box_inv is not None else R_f64
+            for (si, sj) in _nb_samples:
+                ai, aj = sp_atoms_nb[si], sp_atoms_nb[sj]
+                like = (si == sj)
+                if like:
+                    ii, jj = np.triu_indices(len(ai), k=1)
+                    gi, gj = ai[ii], ai[jj]
+                else:
+                    gi_m, gj_m = np.meshgrid(np.arange(len(ai)), np.arange(len(aj)), indexing="ij")
+                    gi, gj = ai[gi_m.ravel()], aj[gj_m.ravel()]
+                if len(gi) == 0:
+                    continue
+                keep = ~nb_excluded[gi, gj]
+                gi, gj = gi[keep], gj[keep]
+                if len(gi) == 0:
+                    continue
+                dq = R_frac[gi] - R_frac[gj]
+                if _box_mat is not None:
+                    dq -= np.round(dq)
+                    dr = dq @ _box_mat
+                else:
+                    dr = dq
+                r = np.linalg.norm(dr, axis=-1)
+                _nb_samples[(si, sj)].append(r[r < self.rcut])
+
+        nb_x_grids_list: list = []
         for idx_si, si in enumerate(unique_species):
-            for sj in unique_species[idx_si:]:  # canonical: si <= sj
+            for sj in unique_species[idx_si:]:
                 nb_species_pairs.append((si, sj))
-                nb_x_grids_list.append(np.linspace(0.1, self.rcut, self.n_knots_nb))
+                _samps = _nb_samples[(si, sj)]
+                _all = np.concatenate(_samps) if _samps else np.array([])
+                if len(_all) >= 10:
+                    r_lo = float(np.percentile(_all, self.percentile_lo))
+                    r_hi = float(np.percentile(_all, self.percentile_hi))
+                else:
+                    r_lo, r_hi = 0.1, self.rcut
+                nb_x_grids_list.append(np.linspace(r_lo, r_hi, self.n_knots_nb))
 
         n_nb_types = len(nb_species_pairs)
         nb_x_grids_np = (np.stack(nb_x_grids_list) if n_nb_types > 0
@@ -1360,6 +1630,8 @@ class SplineModel:
             "n_knots_bond": self.n_knots_bond,
             "n_knots_angle": self.n_knots_angle,
             "n_knots_dihedral": self.n_knots_dihedral,
+            "percentile_lo": self.percentile_lo,
+            "percentile_hi": self.percentile_hi,
         }
         with open(path, "wb") as f:
             cloudpickle.dump(data, f)
@@ -1385,6 +1657,8 @@ class SplineModel:
         obj.n_knots_bond = int(data["n_knots_bond"])
         obj.n_knots_angle = int(data["n_knots_angle"])
         obj.n_knots_dihedral = int(data["n_knots_dihedral"])
+        obj.percentile_lo = float(data.get("percentile_lo", 1.0))
+        obj.percentile_hi = float(data.get("percentile_hi", 99.0))
         obj._cg_species = np.asarray(data["species"])
         obj._n_particles = int(data["n_particles"])
         obj._bond_terms = list(data["bond_terms"])

@@ -151,7 +151,7 @@ DEFAULT_MACE_CONFIG = {
     "output_irreps": "1x0e",
     "max_ell": 3,
     "num_interactions": 2,
-    "correlation": 2,
+    "correlation": 3,
     "n_radial_basis": 8,
     "train_ratio": 0.9,
     "val_ratio": 0.1,  # Ratio of validation data, (Train_ratio + Val_ratio <= 1.0, rest is test data)
