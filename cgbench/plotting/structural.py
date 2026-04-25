@@ -34,6 +34,7 @@ def plot_rdf(
     show_legend=True,
     legend_loc="lower right",
     save_pdf=True,
+    save_png=False,
 ):
     """
     Plot RDF data with optional multi-chain mean and std shading.
@@ -116,13 +117,18 @@ def plot_rdf(
             ax.legend(frameon=False, fontsize=legend_font_size, loc=legend_loc)
         ax.tick_params(direction="in", labelsize=tick_font_size)
 
-        filename = f"{output_prefix}_{combo_label}.pdf"
         plt.tight_layout()
         if save_pdf:
+            filename = f"{output_prefix}_{combo_label}.pdf"
             plt.savefig(filename, format="pdf", dpi=300, bbox_inches="tight")
             print(f"Saved RDF plot for {combo_label} pairs to {filename}")
+        if save_png:
+            filename = f"{output_prefix}_{combo_label}.png"
+            plt.savefig(filename, format="png", dpi=300, bbox_inches="tight")
+            print(f"Saved RDF plot for {combo_label} pairs to {filename}")
+        plt.close(fig)
 
-    print(f"Generated {len(bead_combinations)} RDF plots saved as PDF files.")
+    print(f"Generated {len(bead_combinations)} RDF plots.")
 
 
 def plot_ramachandran(

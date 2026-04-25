@@ -23,6 +23,7 @@ parser.add_argument("--device", type=str, help="GPU or MIG UUID")
 parser.add_argument("--model", type=str, help="Path to best_params.pkl", required=True)
 parser.add_argument("--mol", type=str, help="Molecule to simulate", required=True)
 parser.add_argument("--verbose", action="store_true", default=True)
+parser.add_argument("--disable-cueq", action="store_true", help="Disable cueq (MACE only, overrides --use-so3)")
 parser.add_argument(
     "--xla_mem_fraction",
     type=float,
@@ -160,6 +161,7 @@ if backend == "spline":
     fractional = False
 else:
     fractional = True
+    
 
 # Ref coords for plots
 if "testing" in dataset_dict:
@@ -171,14 +173,16 @@ ref_coords = onp.asarray(jnp.concatenate(
 
 # JAX-MD Displacement function
 box = data.box
+if box is None and "box" in dataset_dict["validation"]:
+    box = dataset_dict["validation"]["box"][0]
 
 if box is not None:
-    displacement_fn, plotting_shift_fn = space.periodic_general(
+    displacement_fn, shift_fn = space.periodic_general(
         box=box,
         fractional_coordinates=fractional
     )
 else:
-    displacement_fn, plotting_shift_fn = space.free()
+    displacement_fn, shift_fn = space.free()
     
 print(f"[SPECIES]: {species}")
 
@@ -192,11 +196,12 @@ nbrs_init, (max_neighbors, max_edges, avg_num_neighbors) = (
         box_key="box" if box is not None else None,
         format=partition.Sparse,
         batch_size=100,
-        capacity_multiplier=2.0,
+        capacity_multiplier=1.2,
     )
 )
 
 species_init = jnp.asarray(species)
+enable_cueq = not args.disable_cueq
 
 if backend == "mace":
     mace_cfg = build_mace_config(
@@ -213,7 +218,7 @@ if backend == "mace":
         n_species=100, # hardcoded n_species
         per_particle=False,
         use_so3=MODEL_CONFIG.get("use_so3", False),
-        enable_cueq=not MODEL_CONFIG.get("use_so3", False),
+        enable_cueq=enable_cueq,
     )
 elif backend == "nequip":
     _init_fn, _nequip_energy_fn = init_nequip_model(
@@ -338,14 +343,6 @@ def init_simulator(
     if config["sim_mol"] in prosol_uncapped and n_chains != 1:
         raise ValueError(f"{config['sim_mol']} simulation only supports n_chains=1.")
 
-    if "box" in dataset_dict["validation"]:
-        _, shift_fn = space.periodic_general(
-            dataset_dict["validation"]["box"][0],
-            fractional_coordinates=fractional,
-        )
-    else:
-        _, shift_fn = space.free()
-
     key, split = random.split(key)
     selection = random.choice(
         split,
@@ -435,16 +432,15 @@ def visualise(traj_path, dataset_dict, displacement_fn, shift_fn, ref_coords):
 
     if config["sim_mol"] in vis_fn_map:
         vis_fn = vis_fn_map[config["sim_mol"]]
-        vis_fn(
-            traj_path,
-            config,
+        vis_kwargs = dict(
             type=MODEL_CONFIG["type"],
-            dataset=dataset_dict,
             cg_map=MODEL_CONFIG["CG_map"],
             disp_fn=displacement_fn,
-            shift_fn=shift_fn,
             ref_coords=ref_coords,
         )
+        if config["sim_mol"] == "benzene_crystal":
+            vis_kwargs["shift_fn"] = shift_fn
+        vis_fn(traj_path, config, **vis_kwargs)
     else:
         raise ValueError(f"No visualizer registered for molecule: {config['sim_mol']}")
 
@@ -466,11 +462,17 @@ def _save_outputs_and_plot(
     with open(os.path.join(save_dir, "traj_state_aux.pkl"), "wb") as f:
         pickle.dump(traj_state.aux, f)
 
+    if box_obj is not None:
+        _box_arr = onp.asarray(box_obj)
+        config["box"] = float(onp.min(onp.linalg.norm(_box_arr, axis=-1)))
+        config["box_volume"] = float(abs(onp.linalg.det(_box_arr)))
+    else:
+        config["box"] = None
+        config["box_volume"] = None
     config_ = config.copy()
     config_["dt"] = dt_ps
     config_["t_total"] = t_total_ps
     config_.pop("dt_values_fs", None)
-    config_["box"] = float(box_obj[0][0]) if box_obj is not None else None
 
     with open(os.path.join(save_dir, "traj_config.json"), "w") as cf:
         json.dump(config_, cf, indent=4)
@@ -540,7 +542,11 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
 
         if os.path.exists(os.path.join(save_dir, "trajectory.pkl")):
             print(f"Found existing trajectory in {save_dir}; skipping run.")
-            visualise(save_dir, data, displacement_fn, plotting_shift_fn, ref_coords)
+            if box is not None and "box" not in config:
+                _box_arr = onp.asarray(box)
+                config["box"] = float(onp.min(onp.linalg.norm(_box_arr, axis=-1)))
+                config["box_volume"] = float(abs(onp.linalg.det(_box_arr)))
+            visualise(save_dir, data, displacement_fn, shift_fn, ref_coords)
             continue
 
         reference_state, traj_generator = init_simulator(
@@ -584,7 +590,7 @@ for dt_fs, dt_ps in zip(dt_values_fs, dt_values_ps):
             box_obj=box,
             dataset_dict=data,
             displacement_fn=displacement_fn,
-            shift_fn=plotting_shift_fn,
+            shift_fn=shift_fn,
             ref_coords=ref_coords,
         )
 

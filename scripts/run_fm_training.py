@@ -65,7 +65,7 @@ args = parser.parse_args()
 
 configure_runtime_environment(
     device=args.device,
-    xla_mem_fraction="0.7",
+    xla_mem_fraction="0.97",
 )
 
 import cloudpickle as pickle

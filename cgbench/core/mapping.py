@@ -685,10 +685,11 @@ class Hexane_Map:
 class BenzeneCrystal_Map:
     """CG mapping for benzene crystal (multi-molecule system).
 
-    Three CG beads per benzene molecule in a triangular arrangement:
-    - bead 0: C1, C2, H1, H2
-    - bead 1: C3, C4, H3, H4
-    - bead 2: C5, C6, H5, H6
+    Three CG beads per benzene molecule in a triangular arrangement.
+
+    Available maps:
+    - ``"three-site"``:     C1/C2/H1/H2 → bead0, C3/C4/H3/H4 → bead1, C5/C6/H5/H6 → bead2
+    - ``"three-site-noh"``: C1/C2 → bead0, C3/C4 → bead1, C5/C6 → bead2 (hydrogens excluded)
     """
 
     _base_species = ["C", "C", "C", "C", "C", "C", "H", "H", "H", "H", "H", "H"]
@@ -709,7 +710,7 @@ class BenzeneCrystal_Map:
         (5, 11),
     ]
 
-    def __init__(self, nmol: int = 128):
+    def __init__(self, nmol: int = 288):
         self.n_replicas = nmol
         self.at_masses = [mass_map[s] for s in self._base_species] * nmol
         at_bonds_global = self._tile_atomistic_bonds(
@@ -717,22 +718,35 @@ class BenzeneCrystal_Map:
             n_atoms_per_mol=len(self._base_species),
         )
 
-        single_indices = [0, 0, 1, 1, 2, 2, -1, -1, -1, -1, -1, -1]
-        indices = self._tile_indices(single_indices, block_size=3)
-        cg_species = np.array([1, 1, 1] * nmol, dtype=np.int32)
-        cg_bonds, cg_angles, cg_dihedrals = _derive_cg_topology_from_atomistic_graph(
-            at_bonds_global,
-            indices,
+        cg_species_single = np.array([1, 1, 1] * nmol, dtype=np.int32)
+
+        # three-site-noh: only carbons, hydrogens excluded
+        noh_indices = self._tile_indices([0, 0, 1, 1, 2, 2, -1, -1, -1, -1, -1, -1], block_size=3)
+        noh_bonds, noh_angles, noh_dihedrals = _derive_cg_topology_from_atomistic_graph(
+            at_bonds_global, noh_indices
+        )
+
+        # three-site: carbons + bonded hydrogens (H_i maps to same bead as C_i)
+        ts_indices = self._tile_indices([0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2], block_size=3)
+        ts_bonds, ts_angles, ts_dihedrals = _derive_cg_topology_from_atomistic_graph(
+            at_bonds_global, ts_indices
         )
 
         self._maps = {
-            "three-site-adjacent": {
-                "indices": indices,
-                "cg_species": cg_species,
-                "cg_bonds": cg_bonds,
-                "cg_angles": cg_angles,
-                "cg_dihedrals": cg_dihedrals,
-            }
+            "three-site-noh": {
+                "indices": noh_indices,
+                "cg_species": cg_species_single,
+                "cg_bonds": noh_bonds,
+                "cg_angles": noh_angles,
+                "cg_dihedrals": noh_dihedrals,
+            },
+            "three-site": {
+                "indices": ts_indices,
+                "cg_species": cg_species_single,
+                "cg_bonds": ts_bonds,
+                "cg_angles": ts_angles,
+                "cg_dihedrals": ts_dihedrals,
+            },
         }
 
     def _tile_indices(self, single: list[int], block_size: int) -> list[int]:
@@ -756,14 +770,14 @@ class BenzeneCrystal_Map:
 
     @staticmethod
     def _normalize_map_name(name: str) -> str:
-        if name == "three-side-adjacent":
-            return "three-site-adjacent"
+        if name in ("three-side-adjacent", "three-site-adjacent"):
+            return "three-site-noh"
         return name
 
     def get_available_maps(self) -> list[str]:
-        return list(self._maps) + ["three-side-adjacent"]
+        return list(self._maps)
 
-    def get_map(self, name: str = "three-site-adjacent") -> tuple:
+    def get_map(self, name: str = "three-site-noh") -> tuple:
         """Return (map_indices, cg_species, cg_masses, weights)."""
         name = self._normalize_map_name(name)
         if name not in self._maps:
@@ -785,7 +799,7 @@ class BenzeneCrystal_Map:
         weights = get_map_weights(indices_arr, at_masses_arr, cg_masses)
         return indices, cg_species, cg_masses, weights
 
-    def get_cg_topology(self, name: str = "three-site-adjacent") -> tuple:
+    def get_cg_topology(self, name: str = "three-site-noh") -> tuple:
         """Return (cg_bond_index, cg_angle_index, cg_dihedral_index)."""
         name = self._normalize_map_name(name)
         if name not in self._maps:
@@ -1315,17 +1329,17 @@ class ThreeBPA_Map:
             6,  # 1BPA               1LIG     C7
             -1,  # 1BPA              1LIG     H6
             -1,  # 1BPA              1LIG     H7
-            7,  # 1BPA               1LIG     C8
-            6,  # 1BPA               1LIG     C9
-            7,  # 1BPA               1LIG    C10
+            6,  # 1BPA               1LIG     C8
+            7,  # 1BPA               1LIG     C9
+            8,  # 1BPA               1LIG    C10
             -1,  # 1BPA              1LIG    H10
             8,  # 1BPA               1LIG    C11
             -1,  # 1BPA              1LIG    H11
-            8,  # 1BPA               1LIG    C12
+            7,  # 1BPA               1LIG    C12
             -1,  # 1BPA              1LIG    H12
             -1,  # 1BPA              1LIG    H13
             -1,  # 1BPA              1LIG    H14
-        ]
+        ] 
 
         try:
             bonds, angles, dihedrals = (

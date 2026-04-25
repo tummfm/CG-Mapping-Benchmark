@@ -48,6 +48,25 @@ parser.add_argument("--nb-range-frames", type=int, default=500,
 parser.add_argument("--batch", type=int, default=16,
                     help="Batch size for normal-equation accumulation (default: 16)")
 
+
+def _parse_interaction_types(s: str) -> str:
+    valid = set("band")
+    bad = set(s) - valid
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"Unknown interaction character(s): {''.join(sorted(bad))}. "
+            "Use b=bond, a=angle, d=dihedral, n=nonbonded."
+        )
+    return s
+
+
+parser.add_argument(
+    "--type", type=_parse_interaction_types, default="band",
+    metavar="TYPES",
+    help="Interactions to fit: b=bond a=angle d=dihedral n=nonbonded "
+         "(e.g. --type ba fits only bonds and angles; default: band)",
+)
+
 args = parser.parse_args()
 
 configure_runtime_environment(device=args.device, xla_mem_fraction="0.97")
@@ -65,12 +84,15 @@ from cgbench.core.spline import SplineForceMatcher
 
 # ---- model config -----------------------------------------------------------
 
+enabled_types: set[str] = set(args.type)
+
 MODEL_CONFIG = {
     **DEFAULT_SPLINE_CONFIG,
     "model": "spline_lsq",
     "mol": args.mol,
     "CG_map": args.cgmap,
     "type": "CG",
+    "interaction_types": args.type,
     "n_knots_nb": args.n_knots_nb,
     "n_knots_bond": args.n_knots_bond,
     "n_knots_angle": args.n_knots_angle,
@@ -122,9 +144,13 @@ if args.verbose:
 
 # ---- output directory -------------------------------------------------------
 
+_nb_tag   = f"_nb={args.n_knots_nb}"       if "n" in enabled_types else ""
+_bond_tag = f"_bond={args.n_knots_bond}"   if "b" in enabled_types else ""
+_ang_tag  = f"_ang={args.n_knots_angle}"   if "a" in enabled_types else ""
+_dih_tag  = f"_dih={args.n_knots_dihedral}" if "d" in enabled_types else ""
 arch_tag = (
-    f"_nb={args.n_knots_nb}_bond={args.n_knots_bond}"
-    f"_ang={args.n_knots_angle}_dih={args.n_knots_dihedral}"
+    f"_type={args.type}"
+    f"{_nb_tag}{_bond_tag}{_ang_tag}{_dih_tag}"
     f"_ridge={args.ridge_alpha}"
 )
 output_dir = (
@@ -156,6 +182,30 @@ spline_model = SplineModel(
 )
 
 _spline_pkl = f"{output_dir}/spline_model.pkl"
+
+# ---- disable interaction types not in --type --------------------------------
+
+if "b" not in enabled_types:
+    spline_model._bond_terms = []
+    spline_model._bond_x_grids = onp.empty((0, spline_model.n_knots_bond))
+    spline_model._n_bond_types = 0
+    print("[SplineModel] Bonds disabled via --type")
+if "a" not in enabled_types:
+    spline_model._angle_terms = []
+    spline_model._angle_x_grids = onp.empty((0, spline_model.n_knots_angle))
+    spline_model._n_angle_types = 0
+    print("[SplineModel] Angles disabled via --type")
+if "d" not in enabled_types:
+    spline_model._dihedral_terms = []
+    spline_model._dihedral_x_grids = onp.empty((0, spline_model.n_knots_dihedral))
+    spline_model._n_dihedral_types = 0
+    print("[SplineModel] Dihedrals disabled via --type")
+if "n" not in enabled_types:
+    spline_model._nb_species_pairs = []
+    spline_model._nb_x_grids = onp.empty((0, spline_model.n_knots_nb))
+    spline_model._n_nb_types = 0
+    print("[SplineModel] Non-bonded disabled via --type")
+
 spline_model.save_data(_spline_pkl)
 print(f"[Spline] Saved model topology/grids to {_spline_pkl}")
 

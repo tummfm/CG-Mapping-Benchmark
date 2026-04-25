@@ -182,8 +182,10 @@ def xi_norm_vectorized(
 def calculate_rdf(
     trajectories,
     bead_types,
+    displacement_fn,
     sites_per_mol=2,
     box_length=2.79573,
+    box_volume=None,
     dr=0.01,
     pair_batch_size=900_000,
     frame_batch_size=100000,
@@ -193,10 +195,16 @@ def calculate_rdf(
     Calculate radial distribution functions for intermolecular pairs using JAX.
 
     Args:
-        trajectories: List of arrays of shape (n_frames, n_particles, 3) or (n_particles, 3)
+        trajectories: List of arrays of shape (n_frames, n_particles, 3) or (n_particles, 3).
+            May be in any coordinate system (fractional or real-space); displacement_fn
+            handles the PBC and unit conversion.
         bead_types: List of bead types for each site in a molecule
+        displacement_fn: JAX-MD displacement function. Used for all pairwise distance
+            calculations so the coordinate system of trajectories does not matter.
         sites_per_mol: Number of sites per molecule
-        box_length: Simulation box length
+        box_length: Smallest real-space box side length (nm); sets r_max = box_length / 2.
+        box_volume: True box volume (nm^3) for shell-volume normalisation. Defaults to
+            box_length**3, which is exact for cubic boxes.
         dr: Bin width for RDF histogram
         pair_batch_size: Number of pairs to process in a batch
         frame_batch_size: Number of frames to process in a batch
@@ -250,15 +258,15 @@ def calculate_rdf(
             )
         pair_indices[(type1, type2)] = (i_inter[type_mask], j_inter[type_mask])
 
-    # JAX-optimized distance calculation
+    # JAX-optimized distance calculation via displacement_fn (handles any coord system)
     @jit
-    def compute_distances(positions, i_idx, j_idx, L):
-        """Compute distances for a batch of frames and pairs."""
+    def compute_distances(positions, i_idx, j_idx):
         pos_i = positions[:, i_idx, :]  # (F, P, 3)
         pos_j = positions[:, j_idx, :]  # (F, P, 3)
-        dr = pos_j - pos_i
-        dr = dr - L * jnp.round(dr / L)  # Minimum image convention
-        return jnp.sqrt(jnp.sum(dr * dr, axis=-1))  # (F, P)
+        def _frame(pi, pj):
+            disps = vmap(displacement_fn)(pj, pi)  # (P, 3)
+            return jnp.sqrt(jnp.sum(disps ** 2, axis=-1))  # (P,)
+        return vmap(_frame)(pos_i, pos_j)  # (F, P)
 
     # Histogram computation
     @jit
@@ -266,12 +274,11 @@ def calculate_rdf(
         """Compute histogram of distances."""
         return jnp.histogram(dists.ravel(), bins=bins)[0]
 
-    volume = box_length**3
+    volume = box_volume if box_volume is not None else box_length**3
     r_max = box_length / 2
     bins_arr = jnp.arange(0.0, r_max + dr, dr)
     shell_volumes = (4.0 / 3.0) * jnp.pi * (bins_arr[1:] ** 3 - bins_arr[:-1] ** 3)
 
-    L = jnp.asarray(box_length, dtype=dtype)
     rdf_data = {}
 
     for traj_idx, traj in enumerate(trajectories):
@@ -305,7 +312,7 @@ def calculate_rdf(
                     positions_f = traj[f0:f1]
 
                     # Compute distances for this batch
-                    dists = compute_distances(positions_f, i_batch, j_batch, L)
+                    dists = compute_distances(positions_f, i_batch, j_batch)
                     hist = hist + compute_histogram(dists, bins_arr)
 
                     f0 = f1

@@ -166,6 +166,84 @@ def plot_hexane_two_site_bond_distribution(
     plt.close(fig)
 
 
+def plot_hexane_rdf(
+    ref_coords: np.ndarray,
+    traj_coords: np.ndarray,
+    cg_map: str,
+    sites_per_mol: int,
+    box_len: float,
+    disp_fn: callable,
+    outpath: str,
+    name: str = "Simulation",
+    rdf_max_frames: int = 20000,
+    rdf_pair_batch_size: int = 20_000,
+    rdf_frame_batch_size: int = 512,
+    rdf_dr: float = 0.01,
+    box_volume: float | None = None,
+) -> None:
+    """Compute and save inter-molecular RDF plots for all bead-type combinations.
+
+    One PNG per combination is written to outpath with filenames like
+    ``hexane_rdf_1-1.png``, ``hexane_rdf_1-2.png``, ``hexane_rdf_2-2.png``.
+    Coordinates may be fractional or real-space; disp_fn handles PBC correctly.
+    """
+    # Bead-type patterns for each mapping (end beads = 1, inner beads = 2).
+    bead_type_map = {
+        "two-site": [1, 1],
+        "two-site-noh": [1, 1],
+        "two-site-Map2": [1, 1],
+        "three-site": [1, 2, 1],
+        "three-site-noh": [1, 2, 1],
+        "three-site-Map1": [1, 2, 1],
+        "four-site": [1, 2, 2, 1],
+        "six-site": [1, 2, 2, 2, 2, 1],
+        "six-site-Map2": [1, 2, 2, 2, 2, 1],
+    }
+    if cg_map not in bead_type_map:
+        print(f"plot_hexane_rdf: unknown cg_map '{cg_map}', skipping RDF.")
+        return
+
+    bead_types = bead_type_map[cg_map]
+
+    ref_coords = np.asarray(ref_coords)
+    traj_coords = np.asarray(traj_coords)
+    if ref_coords.ndim == 4:
+        ref_coords = ref_coords.reshape(-1, ref_coords.shape[-2], ref_coords.shape[-1])
+    if traj_coords.ndim == 4:
+        traj_coords = traj_coords.reshape(-1, traj_coords.shape[-2], traj_coords.shape[-1])
+
+    ref_stride = max(1, int(np.ceil(ref_coords.shape[0] / rdf_max_frames)))
+    traj_stride = max(1, int(np.ceil(traj_coords.shape[0] / rdf_max_frames)))
+
+    print(
+        f"Hexane RDF ({cg_map}): ref_frames={ref_coords[::ref_stride].shape[0]} (stride={ref_stride}), "
+        f"traj_frames={traj_coords[::traj_stride].shape[0]} (stride={traj_stride}), "
+        f"sites_per_mol={sites_per_mol}, bead_types={bead_types}"
+    )
+
+    rdf_data, bead_combinations = calculate_rdf(
+        trajectories=[ref_coords[::ref_stride], traj_coords[::traj_stride]],
+        bead_types=bead_types,
+        displacement_fn=disp_fn,
+        sites_per_mol=sites_per_mol,
+        box_length=box_len,
+        box_volume=box_volume,
+        dr=rdf_dr,
+        pair_batch_size=rdf_pair_batch_size,
+        frame_batch_size=rdf_frame_batch_size,
+    )
+    plot_rdf(
+        rdf_data=rdf_data,
+        bead_combinations=bead_combinations,
+        labels=["Reference", name],
+        output_prefix=os.path.join(outpath, "hexane_rdf"),
+        box_length=box_len,
+        mode="single",
+        save_pdf=False,
+        save_png=True,
+    )
+
+
 def plot_bond_angle_correlation(
     ref_coords, traj_coords, angle_idcs, bond_idcs, disp_fn, outpath
 ):
@@ -281,10 +359,8 @@ def vis_capped_ala(
     config,
     type="AT",
     name="Simulation",
-    dataset=None,
     cg_map="hmerged",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize alanine dipeptide trajectory."""
@@ -350,11 +426,9 @@ def vis_hexane(
     config,
     type="AT",
     name="Simulation",
-    dataset=None,
     cg_map="six-site",
     nmol=100,
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize hexane trajectory."""
@@ -481,6 +555,22 @@ def vis_hexane(
         if cg_dihedral_idcs is not None:
             plot_hex_dihedral(
                 ref_coords, traj_coords, disp_fn, Dihedrals_idcs_all, outpath
+            )
+
+    # RDF plots for all CG mappings.
+    if type != "AT":
+        box_len = config.get("box")
+        if box_len is not None and disp_fn is not None:
+            plot_hexane_rdf(
+                ref_coords=ref_coords,
+                traj_coords=traj_coords,
+                cg_map=cg_map,
+                sites_per_mol=sites_per_mol,
+                box_len=float(box_len),
+                disp_fn=disp_fn,
+                outpath=outpath,
+                name=name,
+                box_volume=config.get("box_volume"),
             )
 
 
@@ -744,10 +834,8 @@ def vis_capped_ala15(
     config,
     type="AT",
     name="Simulation",
-    dataset=None,
     cg_map="hmerged",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize ALA15 trajectory."""
@@ -864,10 +952,8 @@ def vis_capped_pro(
     config,
     type="AT",
     name="Simulation",
-    dataset=None,
     cg_map="hmerged",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize PRO2 trajectory."""
@@ -930,10 +1016,8 @@ def vis_capped_gly(
     config,
     type="AT",
     name="Simulation",
-    dataset=None,
     cg_map="hmerged",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize GLY2 trajectory."""
@@ -993,10 +1077,8 @@ def vis_capped_thr(
     config,
     type="AT",
     name="Simulation",
-    dataset=None,
     cg_map="hmerged",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize THR2 trajectory."""
@@ -1137,10 +1219,8 @@ def vis_staticframe_protein(
     config,
     type="CG",
     name="Simulation",
-    dataset=None,
     cg_map="CA",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize StaticFrame protein trajectory with CA RMSD and pair distances."""
@@ -1180,10 +1260,8 @@ def vis_tip3p_water(
     config,
     type="CG",
     name="Simulation",
-    dataset=None,
     cg_map="UnitedAtom",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize TIP3P water with timeseries and RDF for both water mappings."""
@@ -1212,27 +1290,28 @@ def vis_tip3p_water(
             -1, ref_coords.shape[-2], ref_coords.shape[-1]
         )
 
-    box_arr = np.asarray(dataset.box)
-    box_len = float(box_arr[0, 0]) if box_arr.ndim == 2 else float(box_arr[0])
+    box_len = float(config["box"])
+    box_volume = config.get("box_volume")
 
     ref_max_frames = 20000
     traj_max_frames = 20000
     ref_stride = max(1, int(np.ceil(ref_coords.shape[0] / ref_max_frames)))
     traj_stride = max(1, int(np.ceil(traj_coords.shape[0] / traj_max_frames)))
 
-    ref_nm = ref_coords[::ref_stride] * box_len
-    trajectories = [ref_nm]
+    trajectories = [ref_coords[::ref_stride]]
     labels = [f"Reference ({cg_map})"]
 
     if traj_coords.shape[1] == ref_coords.shape[1]:
-        trajectories.append(traj_coords[::traj_stride] * box_len)
+        trajectories.append(traj_coords[::traj_stride])
         labels.append(f"{name} ({cg_map})")
 
     rdf_data, bead_combinations = calculate_rdf(
         trajectories=trajectories,
         bead_types=[1],
+        displacement_fn=disp_fn,
         sites_per_mol=1,
         box_length=box_len,
+        box_volume=box_volume,
         dr=0.01,
         pair_batch_size=20_000,
         frame_batch_size=512,
@@ -1253,7 +1332,6 @@ def vis_benzene_crystal(
     config,
     type="CG",
     name="Simulation",
-    dataset=None,
     cg_map="three-site-adjacent",
     disp_fn=None,
     shift_fn=None,
@@ -1366,18 +1444,16 @@ def vis_benzene_crystal(
         f"dr={rdf_dr}"
     )
 
-    box_arr = np.asarray(dataset.box)
-    box_len = float(box_arr[0, 0]) if box_arr.ndim == 2 else float(box_arr[0])
-
-    # Coordinates are fractional; convert to nm for calculate_rdf.
-    ref_coords_nm = ref_coords_rdf * box_len
-    traj_coords_nm = traj_coords_rdf * box_len
+    box_len = float(config["box"])
+    box_volume = config.get("box_volume")
 
     rdf_data, bead_combinations = calculate_rdf(
-        trajectories=[ref_coords_nm, traj_coords_nm],
+        trajectories=[ref_coords_rdf, traj_coords_rdf],
         bead_types=[1, 1, 1],
+        displacement_fn=disp_fn,
         sites_per_mol=sites_per_mol,
         box_length=box_len,
+        box_volume=box_volume,
         dr=rdf_dr,
         pair_batch_size=rdf_pair_batch_size,
         frame_batch_size=rdf_frame_batch_size,
@@ -1428,20 +1504,22 @@ def vis_benzene_crystal(
             traj_dummy_forces,
         )
 
-        ref_com_nm = np.asarray(ref_com_frac) * box_len
-        traj_com_nm = np.asarray(traj_com_frac) * box_len
+        ref_com = np.asarray(ref_com_frac)
+        traj_com = np.asarray(traj_com_frac)
 
         print(
             "COM RDF settings: "
-            f"ref_frames={ref_com_nm.shape[0]}, traj_frames={traj_com_nm.shape[0]}, "
-            f"n_benzenes={ref_com_nm.shape[1]}"
+            f"ref_frames={ref_com.shape[0]}, traj_frames={traj_com.shape[0]}, "
+            f"n_benzenes={ref_com.shape[1]}"
         )
 
         rdf_data_com, bead_combinations_com = calculate_rdf(
-            trajectories=[ref_com_nm, traj_com_nm],
+            trajectories=[ref_com, traj_com],
             bead_types=[1],
+            displacement_fn=disp_fn,
             sites_per_mol=1,
             box_length=box_len,
+            box_volume=box_volume,
             dr=rdf_dr,
             pair_batch_size=rdf_pair_batch_size,
             frame_batch_size=rdf_frame_batch_size,
@@ -1463,10 +1541,8 @@ def vis_azobenzene(
     config,
     type="CG",
     name="Simulation",
-    dataset=None,
     cg_map="LVC=0.45",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize azobenzene trajectory (LVC=0.45 mapping).
@@ -1516,7 +1592,7 @@ def vis_azobenzene(
         plt.close(fig)
 
     # Dihedral distribution: C1(2)-N2(1)-N1(0)-C7(5)
-    dihedral_indices = [2, 1, 0, 5]
+    dihedral_indices = [5, 0, 1, 2]
     dihedral_fn = init_dihedral_fn(disp_fn, [dihedral_indices])
     ref_dih = np.asarray(dihedral_fn(ref_coords)).ravel()
     traj_dih = np.asarray(dihedral_fn(traj_coords)).ravel()
@@ -1525,9 +1601,9 @@ def vis_azobenzene(
     plot_1d_dihedral(
         ax, [ref_dih, traj_dih], ["Reference", name], bins=60, degrees=True
     )
-    ax.set_title("Azobenzene dihedral: C1-N2-N1-C7")
+    ax.set_title("Azobenzene dihedral: C7-N1-N2-C1")
     plt.tight_layout()
-    fig.savefig(os.path.join(outpath, "azobenzene_dihedral_C1N2N1C7.png"), dpi=300)
+    fig.savefig(os.path.join(outpath, "azobenzene_dihedral_C7N1N2C1.png"), dpi=300)
     plt.close(fig)
 
 
@@ -1536,10 +1612,8 @@ def vis_3bpa(
     config,
     type="CG",
     name="Simulation",
-    dataset=None,
     cg_map="LVC=0.6",
     disp_fn=None,
-    shift_fn=None,
     ref_coords=None,
 ):
     """Visualize 3BPA trajectory.
@@ -1589,8 +1663,7 @@ def vis_3bpa(
         fig.savefig(os.path.join(outpath, f"3bpa_bond_{safe_label}.png"), dpi=300)
         plt.close(fig)
 
-    # Dihedral distribution: C1(2)-N2(1)-N1(0)-C7(5)
-    dihedral_indices = [2, 1, 0, 5]
+    dihedral_indices = [1, 4, 5, 6]
     dihedral_fn = init_dihedral_fn(disp_fn, [dihedral_indices])
     ref_dih = np.asarray(dihedral_fn(ref_coords)).ravel()
     traj_dih = np.asarray(dihedral_fn(traj_coords)).ravel()
@@ -1599,9 +1672,9 @@ def vis_3bpa(
     plot_1d_dihedral(
         ax, [ref_dih, traj_dih], ["Reference", name], bins=60, degrees=True
     )
-    ax.set_title("3BPA dihedral: C1-N2-N1-C7")
+    ax.set_title("3BPA dihedral: C1-O-C5-C1")
     plt.tight_layout()
-    fig.savefig(os.path.join(outpath, "3bpa_dihedral_C1N2N1C7.png"), dpi=300)
+    fig.savefig(os.path.join(outpath, "3bpa_dihedral_C1OC5C1.png"), dpi=300)
     plt.close(fig)
 
 

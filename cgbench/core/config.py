@@ -151,7 +151,7 @@ DEFAULT_MACE_CONFIG = {
     "output_irreps": "1x0e",
     "max_ell": 3,
     "num_interactions": 2,
-    "correlation": 3,
+    "correlation": 2,
     "n_radial_basis": 8,
     "train_ratio": 0.9,
     "val_ratio": 0.1,  # Ratio of validation data, (Train_ratio + Val_ratio <= 1.0, rest is test data)
@@ -178,7 +178,7 @@ DEFAULT_SPLINE_CONFIG = {
 DEFAULT_TRAIN_CONFIG = {
     "batch_size": 32,
     "init_lr": 0.001,
-    "num_epochs": 5,
+    "num_epochs": 20,
     "decay_rate": 0.95,
     "optimizer": "adam+decay",
     "cache": 100,
@@ -231,7 +231,7 @@ DEFAULT_SIM_CONFIG = {
     "ensemble": "NVT",  # NVT or NVE
     # "t_eq": 0,  # Equlibration time in ps
     "t_total": 100,  # Total simulation time in ps (- t_eq)
-    "n_chains": 3,  # Number of simulations (parallel)
+    "n_chains": 1,  # Number of simulations (parallel)
     "T": 300.0,
     "PRNGKey_seed": SEED,
 }
