@@ -22,5 +22,4 @@ traj.lammpstrj
 MLP_train*/
 setup.py
 checkpoints/
-tests/
 cgbench.egg-info/
