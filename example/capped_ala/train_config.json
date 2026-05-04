@@ -1,0 +1,27 @@
+{
+    "optimizer": {
+        "init_lr": 0.001,
+        "lr_decay": 0.95,
+        "epochs": 20,
+        "batch": 32,
+        "cache": 100,
+        "power": "exponential",
+        "weight_decay": 0.0,
+        "type": "ADAM",
+        "optimizer_kwargs": {
+            "b1": 0.9,
+            "b2": 0.999,
+            "eps": 1e-08
+        }
+    },
+    "gammas": {
+        "F": 1.0
+    },
+    "swa": {
+        "enabled": false,
+        "start_epoch": 15,
+        "every": 1,
+        "min_snapshots": 2,
+        "prefer": true
+    }
+}

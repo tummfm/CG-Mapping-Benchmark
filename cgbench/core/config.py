@@ -169,7 +169,6 @@ DEFAULT_SPLINE_CONFIG = {
     "n_knots_bond": 20,
     "n_knots_angle": 20,
     "n_knots_dihedral": 20,
-    "r_onset_fraction": 0.9,   # r_onset = r_onset_fraction * r_cutoff
     "train_ratio": 0.9,
     "val_ratio": 0.1,
     "PRNGKey_seed": SEED,

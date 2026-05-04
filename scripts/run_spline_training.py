@@ -26,13 +26,13 @@ parser.add_argument("--cgmap", type=str, required=True, help="CG mapping name")
 parser.add_argument("--mol", type=str, required=True, help="Molecule name")
 parser.add_argument("--stride", type=int, default=None, help="Subsample dataset")
 parser.add_argument("--verbose", action="store_true", default=False)
-parser.add_argument("--n-knots-nb", type=int, default=50,
+parser.add_argument("--n-knots-nb", type=int, default=20,
                     help="Knots for non-bonded splines")
-parser.add_argument("--n-knots-bond", type=int, default=50,
+parser.add_argument("--n-knots-bond", type=int, default=20,
                     help="Knots for bond splines")
-parser.add_argument("--n-knots-angle", type=int, default=50,
+parser.add_argument("--n-knots-angle", type=int, default=20,
                     help="Knots for angle splines")
-parser.add_argument("--n-knots-dihedral", type=int, default=50,
+parser.add_argument("--n-knots-dihedral", type=int, default=20,
                     help="Knots for dihedral splines")
 parser.add_argument("--ridge-alpha", type=float, default=0.0,
                     help="L2 regularisation on spline coefficients (0 = none)")
@@ -47,6 +47,11 @@ parser.add_argument("--nb-range-frames", type=int, default=500,
                          "bonded range uses 4x this value (default 500)")
 parser.add_argument("--batch", type=int, default=16,
                     help="Batch size for normal-equation accumulation (default: 16)")
+parser.add_argument(
+    "--spline-type", type=str, default="b-spline",
+    choices=["b-spline", "cubic-spline"],
+    help="Spline basis: 'b-spline' (default) or 'cubic-spline'",
+)
 
 
 def _parse_interaction_types(s: str) -> str:
@@ -103,7 +108,7 @@ MODEL_CONFIG = {
     "nb_range_frames": args.nb_range_frames,
     "train_ratio": args.train_ratio,
     "val_ratio": args.val_ratio,
-    "r_onset_fraction": DEFAULT_SPLINE_CONFIG.get("r_onset_fraction", 0.9),
+    "spline_type": args.spline_type,
 }
 
 # ---- dataset ----------------------------------------------------------------
@@ -152,6 +157,7 @@ arch_tag = (
     f"_type={args.type}"
     f"{_nb_tag}{_bond_tag}{_ang_tag}{_dih_tag}"
     f"_ridge={args.ridge_alpha}"
+    f"_stype={args.spline_type}"
 )
 output_dir = (
     f"outputs/Model=spline_lsq/"
@@ -165,9 +171,6 @@ os.makedirs(output_dir, exist_ok=True)
 
 # ---- spline model -----------------------------------------------------------
 
-r_onset = MODEL_CONFIG["r_onset_fraction"] * MODEL_CONFIG["r_cutoff"]
-MODEL_CONFIG["r_onset"] = r_onset
-
 spline_model = SplineModel(
     dataset=data,
     rcut=MODEL_CONFIG["r_cutoff"],
@@ -175,10 +178,10 @@ spline_model = SplineModel(
     n_knots_bond=args.n_knots_bond,
     n_knots_angle=args.n_knots_angle,
     n_knots_dihedral=args.n_knots_dihedral,
-    r_onset=r_onset,
     percentile_lo=args.percentile_lo,
     percentile_hi=args.percentile_hi,
     max_frames_nb=args.nb_range_frames,
+    spline_type=args.spline_type,
 )
 
 _spline_pkl = f"{output_dir}/spline_model.pkl"
@@ -208,6 +211,43 @@ if "n" not in enabled_types:
 
 spline_model.save_data(_spline_pkl)
 print(f"[Spline] Saved model topology/grids to {_spline_pkl}")
+
+# ---- print parametrised interactions ----------------------------------------
+
+_sp = onp.asarray(spline_model._cg_species)
+
+print("[SplineModel] Parametrised interactions:")
+
+_rows = []  # (label, grid, unit)
+
+_bond_sp = {}
+for i, j, tid in spline_model._bond_terms:
+    _bond_sp.setdefault(tid, (int(_sp[i]), int(_sp[j])))
+for tid in range(spline_model._n_bond_types):
+    si, sj = _bond_sp[tid]
+    _rows.append((f"Bond ({si},{sj})", spline_model._bond_x_grids[tid], "nm"))
+
+_angle_sp = {}
+for i, j, k, tid in spline_model._angle_terms:
+    _angle_sp.setdefault(tid, (int(_sp[i]), int(_sp[j]), int(_sp[k])))
+for tid in range(spline_model._n_angle_types):
+    si, sj, sk = _angle_sp[tid]
+    _rows.append((f"Angle ({si},{sj},{sk})", spline_model._angle_x_grids[tid], "rad"))
+
+_dih_sp = {}
+for i, j, k, l, tid in spline_model._dihedral_terms:
+    _dih_sp.setdefault(tid, (int(_sp[i]), int(_sp[j]), int(_sp[k]), int(_sp[l])))
+for tid in range(spline_model._n_dihedral_types):
+    si, sj, sk, sl = _dih_sp[tid]
+    _rows.append((f"Dihedral ({si},{sj},{sk},{sl})", spline_model._dihedral_x_grids[tid], "rad"))
+
+for tid, (si, sj) in enumerate(spline_model._nb_species_pairs):
+    _rows.append((f"NonBond ({si},{sj})", spline_model._nb_x_grids[tid], "nm"))
+
+_w = max((len(label) for label, _, _ in _rows), default=0)
+for label, g, unit in _rows:
+    res = (g[-1] - g[0]) / (len(g) - 1)
+    print(f"  {label:<{_w}}  xmin={g[0]:8.4f}  xmax={g[-1]:8.4f}  res={res:.6f} {unit}  [{len(g)} knots]")
 
 # ---- neighbor list ----------------------------------------------------------
 

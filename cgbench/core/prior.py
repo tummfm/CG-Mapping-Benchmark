@@ -1293,16 +1293,107 @@ def get_prior_energy_fn_template(
 
 
 # ---------------------------------------------------------------------------
-# Smooth cutoff helper (shared by SplineModel)
+# B-spline evaluator (clamped uniform quintic, matching OpenMSCG order=6)
 # ---------------------------------------------------------------------------
 
-def _smooth_cutoff(
-    r: jnp.ndarray, r_onset: float, r_cutoff: float
-) -> jnp.ndarray:
-    """5th-order polynomial switch: 1 for r ≤ r_onset, 0 for r ≥ r_cutoff."""
-    t = jnp.clip((r - r_onset) / (r_cutoff - r_onset + 1e-12), 0.0, 1.0)
-    poly = jnp.float32(1.0) - jnp.float32(6.0) * t**5 + jnp.float32(15.0) * t**4 - jnp.float32(10.0) * t**3
-    return jnp.where(r >= jnp.float32(r_cutoff), jnp.float32(0.0), poly)
+class QuinticBSplineEval:
+    """Clamped uniform quintic B-spline evaluator, JAX-differentiable.
+
+    Degree-5 (order-6) spline matching OpenMSCG's default, giving C⁴ continuity.
+    The energy is linear in the control points c (required for one-shot force
+    matching).  Clamped: U(x_lo) = c[0], U(x_hi) = c[n-1].
+
+    Args:
+        x_grid: (n,) uniformly-spaced knot positions; n >= 6.
+        c:      (n,) B-spline control point values (the trainable parameters).
+    """
+
+    def __init__(self, x_grid: jnp.ndarray, c: jnp.ndarray) -> None:
+        n = int(x_grid.shape[0])
+        assert n >= 6, "Need at least 6 control points for a quintic B-spline"
+        self.x_grid = x_grid
+        self.c = c
+        x_lo = x_grid[0]
+        x_hi = x_grid[-1]
+
+        # Clamped knot vector (length n+6): 6 repeated at each boundary,
+        # n-6 uniform interior knots.
+        if n > 6:
+            interior = jnp.linspace(x_lo, x_hi, n - 4)[1:-1]
+        else:
+            interior = jnp.zeros(0, dtype=jnp.float32)
+        self._t = jnp.concatenate([
+            jnp.full(6, x_lo, dtype=jnp.float32),
+            interior.astype(jnp.float32),
+            jnp.full(6, x_hi, dtype=jnp.float32),
+        ])
+
+    def __call__(self, x_new: jnp.ndarray) -> jnp.ndarray:
+        """Evaluate B-spline at x_new (1-D array of evaluation points)."""
+        return jax.vmap(self._eval_scalar)(x_new)
+
+    def _eval_scalar(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Evaluate at a single point via the unrolled de Boor algorithm (p=5)."""
+        t = self._t
+        c = self.c
+        n = c.shape[0]
+
+        # Knot span: largest k with t[k] <= x, clamped to [5, n-1].
+        k = jnp.clip(jnp.searchsorted(t, x, side='right') - 1, 5, n - 1)
+
+        # Local control points d[0..5] = c[k-5 .. k]
+        d = jax.lax.dynamic_slice(c, (k - 5,), (6,))
+
+        # 10 consecutive knot values t[k-4 .. k+5]; tl[i] == t[k-4+i]
+        tl = jax.lax.dynamic_slice(t, (k - 4,), (10,))
+
+        def _alpha(tj: jnp.ndarray, tjp: jnp.ndarray) -> jnp.ndarray:
+            denom = tjp - tj
+            return jnp.where(denom > jnp.float32(1e-12),
+                             (x - tj) / denom, jnp.float32(0.0))
+
+        # Unrolled de Boor recursion for degree p=5.
+        # alpha_j^(r) = (x - tl[j+r-1]) / (tl[j+5] - tl[j+r-1])
+
+        # r=1: 6 → 5 values
+        a0 = _alpha(tl[0], tl[5])
+        a1 = _alpha(tl[1], tl[6])
+        a2 = _alpha(tl[2], tl[7])
+        a3 = _alpha(tl[3], tl[8])
+        a4 = _alpha(tl[4], tl[9])
+        e0 = (jnp.float32(1.) - a0) * d[0] + a0 * d[1]
+        e1 = (jnp.float32(1.) - a1) * d[1] + a1 * d[2]
+        e2 = (jnp.float32(1.) - a2) * d[2] + a2 * d[3]
+        e3 = (jnp.float32(1.) - a3) * d[3] + a3 * d[4]
+        e4 = (jnp.float32(1.) - a4) * d[4] + a4 * d[5]
+
+        # r=2: 5 → 4 values
+        b0 = _alpha(tl[1], tl[5])
+        b1 = _alpha(tl[2], tl[6])
+        b2 = _alpha(tl[3], tl[7])
+        b3 = _alpha(tl[4], tl[8])
+        f0 = (jnp.float32(1.) - b0) * e0 + b0 * e1
+        f1 = (jnp.float32(1.) - b1) * e1 + b1 * e2
+        f2 = (jnp.float32(1.) - b2) * e2 + b2 * e3
+        f3 = (jnp.float32(1.) - b3) * e3 + b3 * e4
+
+        # r=3: 4 → 3 values
+        p0 = _alpha(tl[2], tl[5])
+        p1 = _alpha(tl[3], tl[6])
+        p2 = _alpha(tl[4], tl[7])
+        g0 = (jnp.float32(1.) - p0) * f0 + p0 * f1
+        g1 = (jnp.float32(1.) - p1) * f1 + p1 * f2
+        g2 = (jnp.float32(1.) - p2) * f2 + p2 * f3
+
+        # r=4: 3 → 2 values
+        q0 = _alpha(tl[3], tl[5])
+        q1 = _alpha(tl[4], tl[6])
+        h0 = (jnp.float32(1.) - q0) * g0 + q0 * g1
+        h1 = (jnp.float32(1.) - q1) * g1 + q1 * g2
+
+        # r=5: 2 → 1 value
+        s0 = _alpha(tl[4], tl[5])
+        return (jnp.float32(1.) - s0) * h0 + s0 * h1
 
 
 # ---------------------------------------------------------------------------
@@ -1310,32 +1401,31 @@ def _smooth_cutoff(
 # ---------------------------------------------------------------------------
 
 class SplineModel:
-    """Standalone CG force-matched model using learnable cubic splines.
+    """Standalone CG force-matched model using learnable quintic B-splines.
 
     Analogous to VOTCA csg_fmatch: all interactions (bonds, angles, dihedrals,
-    and non-bonded pairs) are represented as piecewise cubic splines with
-    uniformly-spaced knots.  The energy values at the knot positions are the
-    trainable parameters, optimised by force matching via the standard
-    :class:`~chemtrain.trainers.ForceMatching` trainer.
+    and non-bonded pairs) are represented as piecewise quintic B-splines (degree 5,
+    matching OpenMSCG's default order=6) with uniformly-spaced knots.  The energy
+    values at the knot positions are the trainable parameters, optimised by force
+    matching via the standard :class:`~chemtrain.trainers.ForceMatching` trainer.
 
-    Uses :class:`~jax_md_mod.custom_interpolate.MonotonicInterpolate` for
-    JAX-native differentiable cubic spline evaluation.
+    Non-bonded interactions use TRUNC extrapolation (zero outside the spline domain),
+    matching OpenMSCG's default behaviour.
 
     Args:
         dataset:           :class:`~cgbench.core.dataset.BaseDataset` instance
                            with CG topology and trajectory already available
                            (``coarse_grain()`` must have been called first).
         rcut:              Non-bonded hard cutoff in nm.
-        n_knots_nb:        Number of knots for non-bonded splines (≥ 4).
-        n_knots_bond:      Number of knots for bond splines (≥ 4).
-        n_knots_angle:     Number of knots for angle splines (≥ 4).
-        n_knots_dihedral:  Number of knots for dihedral splines (≥ 4).
+        n_knots_nb:        Number of knots for non-bonded splines (≥ 6).
+        n_knots_bond:      Number of knots for bond splines (≥ 6).
+        n_knots_angle:     Number of knots for angle splines (≥ 6).
+        n_knots_dihedral:  Number of knots for dihedral splines (≥ 6).
         T:                 Temperature in K (reserved for future use).
         split:             Dataset split used for knot-range estimation.
-        r_onset:           Smooth-cutoff onset in nm.  Defaults to 0.9·rcut.
     """
 
-    _MIN_KNOTS: int = 4  # MonotonicInterpolate requires len(x) > 3
+    _MIN_KNOTS: int = 6  # quintic B-spline requires at least 6 control points
 
     def __init__(
         self,
@@ -1347,14 +1437,14 @@ class SplineModel:
         n_knots_dihedral: int = 20,
         T: float = 300.0,
         split: str = "training",
-        r_onset: float | None = None,
-        percentile_lo: float = 1.0,
-        percentile_hi: float = 99.0,
+        percentile_lo: float = 0.0,
+        percentile_hi: float = 100.0,
         max_frames_nb: int = 500,
+        spline_type: str = "b-spline",
     ):
         self.rcut = float(rcut)
-        self.r_onset = float(r_onset if r_onset is not None else 0.9 * rcut)
-        self.n_knots_nb = max(n_knots_nb, self._MIN_KNOTS)
+        self.spline_type = str(spline_type)
+        self.n_knots_nb = max(n_knots_nb, self._MIN_KNOTS)  # enforce >= 6
         self.n_knots_bond = max(n_knots_bond, self._MIN_KNOTS)
         self.percentile_lo = float(percentile_lo)
         self.percentile_hi = float(percentile_hi)
@@ -1599,7 +1689,7 @@ class SplineModel:
         print(
             f"[SplineModel] {n_b} bond type(s), {n_a} angle type(s), "
             f"{n_d} dihedral type(s), {n_nb_types} non-bonded type(s). "
-            f"rcut={self.rcut} nm, r_onset={self.r_onset:.3f} nm."
+            f"rcut={self.rcut} nm."
         )
 
     # -------------------------------------------------------------------------
@@ -1625,13 +1715,13 @@ class SplineModel:
             "species": self._cg_species,
             "n_particles": self._n_particles,
             "rcut": self.rcut,
-            "r_onset": self.r_onset,
             "n_knots_nb": self.n_knots_nb,
             "n_knots_bond": self.n_knots_bond,
             "n_knots_angle": self.n_knots_angle,
             "n_knots_dihedral": self.n_knots_dihedral,
             "percentile_lo": self.percentile_lo,
             "percentile_hi": self.percentile_hi,
+            "spline_type": self.spline_type,
         }
         with open(path, "wb") as f:
             cloudpickle.dump(data, f)
@@ -1652,13 +1742,13 @@ class SplineModel:
         """
         obj = cls.__new__(cls)
         obj.rcut = float(data["rcut"])
-        obj.r_onset = float(data["r_onset"])
         obj.n_knots_nb = int(data["n_knots_nb"])
         obj.n_knots_bond = int(data["n_knots_bond"])
         obj.n_knots_angle = int(data["n_knots_angle"])
         obj.n_knots_dihedral = int(data["n_knots_dihedral"])
         obj.percentile_lo = float(data.get("percentile_lo", 1.0))
         obj.percentile_hi = float(data.get("percentile_hi", 99.0))
+        obj.spline_type = str(data.get("spline_type", "b-spline"))
         obj._cg_species = np.asarray(data["species"])
         obj._n_particles = int(data["n_particles"])
         obj._bond_terms = list(data["bond_terms"])
@@ -1732,6 +1822,13 @@ class SplineModel:
         """
         _bond_length, _angle, _dihedral = _make_geometry_fns(displacement_fn)
 
+        spline_type = self.spline_type
+
+        def _make_spline(x_grid: jnp.ndarray, c: jnp.ndarray):
+            if spline_type == "b-spline":
+                return QuinticBSplineEval(x_grid, c)
+            return MonotonicInterpolate(x_grid, c)
+
         # Close over fixed data as JAX arrays
         bond_x_grids_jax = [jnp.asarray(self._bond_x_grids[tid], dtype=jnp.float32)
                             for tid in range(self._n_bond_types)]
@@ -1773,7 +1870,6 @@ class SplineModel:
         species_jax = jnp.asarray(self._cg_species)
         n_particles = self._n_particles
         rcut = jnp.float32(self.rcut)
-        r_onset = jnp.float32(self.r_onset)
 
         def spline_energy_fn_template(params: dict) -> Callable:
             bond_params = params["bonds"]       # (n_bond_types, n_knots_bond)
@@ -1788,7 +1884,7 @@ class SplineModel:
                 for tid, pair_idx in enumerate(bond_idx_by_type):
                     if pair_idx.shape[0] == 0:
                         continue
-                    spline = MonotonicInterpolate(bond_x_grids_jax[tid], bond_params[tid])
+                    spline = _make_spline(bond_x_grids_jax[tid], bond_params[tid])
                     r = jax.vmap(lambda p: _bond_length(position, p[0], p[1]))(pair_idx)
                     total = total + jnp.sum(spline(r).astype(jnp.float32))
 
@@ -1796,7 +1892,7 @@ class SplineModel:
                 for tid, triplet_idx in enumerate(angle_idx_by_type):
                     if triplet_idx.shape[0] == 0:
                         continue
-                    spline = MonotonicInterpolate(angle_x_grids_jax[tid], angle_params[tid])
+                    spline = _make_spline(angle_x_grids_jax[tid], angle_params[tid])
                     theta = jax.vmap(lambda p: _angle(position, p[0], p[1], p[2]))(triplet_idx)
                     total = total + jnp.sum(spline(theta).astype(jnp.float32))
 
@@ -1804,7 +1900,7 @@ class SplineModel:
                 for tid, quad_idx in enumerate(dihedral_idx_by_type):
                     if quad_idx.shape[0] == 0:
                         continue
-                    spline = MonotonicInterpolate(dihedral_x_grids_jax[tid], dihedral_params[tid])
+                    spline = _make_spline(dihedral_x_grids_jax[tid], dihedral_params[tid])
                     phi = jax.vmap(lambda p: _dihedral(position, p[0], p[1], p[2], p[3]))(quad_idx)
                     total = total + jnp.sum(spline(phi).astype(jnp.float32))
 
@@ -1829,14 +1925,19 @@ class SplineModel:
                     r_all = jnp.sqrt(
                         jnp.where(valid, r_sq, jnp.float32(1.0))
                     ).astype(jnp.float32)  # (max_edges,)
-                    cutoff_weights = _smooth_cutoff(r_all, r_onset, rcut)
 
                     species_i = species_jax[safe_idx_i]  # (max_edges,)
                     species_j = species_jax[safe_idx_j]  # (max_edges,)
 
                     for type_id, (si, sj) in enumerate(nb_species_pairs):
-                        spline = MonotonicInterpolate(nb_x_grids_jax[type_id], nb_params[type_id])
-                        u_ij = spline(r_all).astype(jnp.float32) * cutoff_weights
+                        spline = _make_spline(nb_x_grids_jax[type_id], nb_params[type_id])
+                        u_raw = spline(r_all).astype(jnp.float32)
+
+                        # TRUNC: zero outside spline domain (matches OpenMSCG default).
+                        x_lo = nb_x_grids_jax[type_id][0]
+                        x_hi = nb_x_grids_jax[type_id][-1]
+                        in_range = (r_all >= x_lo) & (r_all <= x_hi)
+                        u_ij = jnp.where(in_range, u_raw, jnp.float32(0.0))
 
                         # Match both orderings; each physical pair (i,j) appears
                         # twice in the symmetric NL, so multiply by 0.5.

@@ -1,0 +1,19 @@
+{
+    "gamma": 100.0,
+    "print_every": 0.5,
+    "sim_mode": "sampling",
+    "ensemble": "NVT",
+    "t_total": 1000.0,
+    "n_chains": 10,
+    "T": 300.0,
+    "PRNGKey_seed": 22,
+    "sim_mol": "capped_ala",
+    "type": "CG",
+    "cg_map": "coreBetaMap2",
+    "t_eq": 0.0,
+    "kT": 2.49435321,
+    "nmol": 1,
+    "dt": 0.002,
+    "box": 3.279370069503784,
+    "box_volume": 35.2672233581543
+}
