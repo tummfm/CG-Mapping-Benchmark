@@ -1,4 +1,4 @@
-> **_NOTE:_** This codebase is contiuously updated. The state for the JCIM publication "Mapping Still Matters: Coarse-Graining with Machine Learning Potentials" can be found in the branch `JCIM-acs.jcim.5c03035` (latest commit `08d2fa0`).
+> **_NOTE:_** This codebase is continuously updated. The state for the JCIM publication "Mapping Still Matters: Coarse-Graining with Machine Learning Potentials" can be found in the branch `JCIM-acs.jcim.5c03035` (latest commit `08d2fa0`).
 
 # CG Mapping Benchmark 
 Testing different coarse-graining (CG) mappings with classical and machine learning potentials (MLPs).
@@ -13,32 +13,40 @@ The repository is organized into the following structure:
 CG-Mapping-Benchmark/
 ├── cgbench/                    # Main package (installable)
 │   ├── core/                   # Core functionality
-│   │   ├── mapping.py          # Mapping classes (Hexane_Map, Ala2_Map, etc.)
-│   │   ├── dataset.py          # Dataset classes (BaseDataset, Hexane_Dataset, etc.)
-│   │   └── config.py           # Configuration (Dataset_paths, default configs)
-│   └── utils/                  # Utility functions
-│       ├── helpers.py          # General helper functions (plotting, calculations)
-│       ├── analysis.py         # Structural analysis utilities
-│       └── visualization.py    # Trajectory visualization functions
+│   │   ├── mapping.py          # CG mapping definitions and mapping helpers
+│   │   ├── dataset.py          # Dataset loaders and preprocessing wrappers
+│   │   ├── prior.py            # Boltzmann inversion and spline prior models
+│   │   └── config.py           # Default model/train/simulation configurations
+│   ├── utils/                  # Analysis and geometry utilities
+│   │   ├── io.py
+│   │   ├── chains.py
+│   │   ├── geometry.py
+│   │   └── structural.py
+│   └── plotting/               # Plotting and visualization utilities
+│       ├── style.py
+│       ├── distributions.py
+│       ├── structural.py
+│       ├── timeseries.py
+│       ├── training.py
+│       ├── priors.py
+│       └── molecules.py
 │
 ├── scripts/                    # Executable scripts
-│   ├── training/               # Training scripts
-│   │   ├── run_mace_training.py
-│   │   └── run_nequip_training.py
-│   ├── simulation/            # Simulation scripts
-│   │   ├── run_mace_simulation.py
-│   │   └── run_nequip_simulation.py
-│   └── utils/                 # Utility scripts
-│       └── extract_hexane_conf.py
+│   ├── run_fm_training.py      # Unified FM training (MACE/NequIP/Spline)
+│   ├── run_simulation.py       # Unified simulation script
+│   └── utils.py                # Shared helpers used by scripts
 │
 ├── notebooks/                 # Jupyter notebooks for analysis
 │   ├── ala15.ipynb
 │   ├── hexane.ipynb
 │   ├── amino_acids.ipynb
-│   └── chirality_metadynamics.ipynb
+│   ├── chirality_metadynamics.ipynb
+│   └── test.ipynb
 │
-├── data/                      # Reference data
-│   └── reference_simulations/  # Reference simulation data
+├── data/                      # Reference data and metadata
+│   ├── preview.png
+│   ├── residue_maps.json
+│   └── reference_simulations/ # Reference simulation data
 │       ├── hexane/
 │       └── peptides/
 │
@@ -48,11 +56,15 @@ CG-Mapping-Benchmark/
 │   ├── Hexane/                # Hexane results
 │   └── Chirality_inversion/   # Chirality inversion results
 │
-└── outputs/                    # Training outputs
-    ├── MLP_train/             # MLP training results
-    ├── MLP_train_nequip/     # NequIP training results
-    ├── MLP_train_allegro/     # Allegro training results
-    └── MLP_train_dimenet/     # DimeNet training results
+├── outputs/                    # Model training and simulation outputs
+│   ├── Model=mace/
+│   ├── Model=spline/
+│   ├── MLP_train/
+│   └── prior_test/
+├── external/                   # External model backends and layers
+│   └── models/
+├── checkpoints/                # Saved checkpoint artifacts
+└── tests/                      # Test suite
 ```
 
 ### Package Usage
@@ -61,13 +73,15 @@ The `cgbench` package can be imported and used as follows:
 
 ```python
 # Import core functionality
-from cgbench.core import dataset, mapping, config
-from cgbench.core.dataset import Hexane_Dataset, Ala2_Dataset
-from cgbench.core.mapping import Hexane_Map, Ala2_Map
+from cgbench.core import dataset, mapping, config, prior
+from cgbench.core.dataset import Hexane_Dataset, Capped_Ala2_Dataset
+from cgbench.core.mapping import Hexane_Map, CappedPeptideMap
 
 # Import utilities
-from cgbench.utils import helpers, analysis, visualization
-from cgbench.utils.helpers import plot_predictions, plot_convergence
+from cgbench.utils import io, chains, geometry, structural
+
+# Import plotting helpers
+from cgbench.plotting import training, structural as structural_plots
 ```
 
 ### Running Scripts
@@ -75,11 +89,13 @@ from cgbench.utils.helpers import plot_predictions, plot_convergence
 Scripts are located in the `scripts/` directory and can be run from the repository root:
 
 ```bash
-# Training
-python scripts/training/run_mace_training.py --mol hexane --cgmap two-site --rcut 0.8
+# Unified force-matching training (MACE example)
+# Default model config comes from cgbench.core.config.py, flags overwrite default
+python scripts/run_fm_training.py --model mace --mol hexane --cgmap two-site --rcut 0.8
 
-# Simulation
-python scripts/simulation/run_mace_simulation.py --model path/to/model --mol hexane
+# Unified simulation (model backend is inferred from config.json)
+# Default sim config comes from cgbench.core.config.py, flags overwrite default
+python scripts/run_simulation.py --model outputs/Model=mace/<run>/best_params.pkl --mol hexane --dt 2 --t-total 100 --n-chains 1
 ```
 
 ## Systems

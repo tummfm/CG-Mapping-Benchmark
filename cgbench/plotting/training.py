@@ -7,7 +7,6 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from cycler import cycler
 
-
 def plot_predictions(
     predictions: dict, reference_data: dict, out_dir: str, name: str
 ) -> None:
@@ -240,4 +239,147 @@ def compare_atom_distances(
     fname = f"{outpath}/Atom_distances_{name}_vs_Reference.png"
     plt.savefig(fname, dpi=300)
     plt.close(fig)
+    return fname
+
+
+def plot_bond_potentials(
+    extract_fn,
+    full_vars,
+    dataset,
+    nbrs,
+    bond_index,
+    output_dir,
+    species=None,
+    n_sample=20,
+):
+    """Plot fitted harmonic bond potentials for a MACEBond model.
+
+    Since bond parameters come from a species-pair lookup table (same k and r0
+    for every bond of the same type), bonds are grouped by their species pair
+    and one curve is drawn per unique pair.
+
+    Saves to ``{output_dir}/bond_potentials.png``.
+
+    Args:
+        extract_fn: Callable returning ``{"bond_k": [B], "bond_r0": [B]}``.
+        full_vars:  Flax variable dict.
+        dataset:    Dict with keys ``"R"`` and ``"mask"``.
+        nbrs:       Initialised neighbour list.
+        bond_index: ``[2, B]`` integer array of bonded pairs.
+        output_dir: Directory to save the figure.
+        species:    Global species array (single-molecule); ignored for CATH
+                    (per-frame species read from dataset).
+        n_sample:   Number of frames to sample (used to confirm consistency).
+    """
+    import math
+    from jax import numpy as jnp, tree_util
+
+    R     = np.asarray(dataset["R"])
+    masks = np.asarray(dataset["mask"])
+    n_total  = R.shape[0]
+    n_sample = min(n_sample, n_total)
+    sample_idx = np.linspace(0, n_total - 1, n_sample, dtype=int)
+
+    bond_index = np.asarray(bond_index)   # [2, B]
+    n_bonds = bond_index.shape[1]
+
+    per_frame_species = dataset.get("species", None)
+    per_frame_subset  = dataset.get("subset", None)
+
+    # Resolve species for the first sampled frame — used to label bond types.
+    if per_frame_species is not None:
+        frame_species = np.asarray(per_frame_species[sample_idx[0]])
+    elif species is not None:
+        frame_species = np.asarray(species)
+    else:
+        frame_species = None
+
+    # Group bond indices by canonical species pair (s_lo, s_hi).
+    pair_to_bonds: dict = {}
+    for b in range(n_bonds):
+        if frame_species is not None:
+            s_i = int(frame_species[bond_index[0, b]])
+            s_j = int(frame_species[bond_index[1, b]])
+            pair = (min(s_i, s_j), max(s_i, s_j))
+        else:
+            pair = (int(bond_index[0, b]), int(bond_index[1, b]))
+        pair_to_bonds.setdefault(pair, []).append(b)
+
+    # Extract params from sampled frames.
+    all_bond_k, all_bond_r0 = [], []
+    print(f"Extracting bond parameters from {n_sample} validation frames …")
+    for i in sample_idx:
+        r = jnp.asarray(R[i])
+        m = jnp.asarray(masks[i])
+        nbrs_i = nbrs.update(r, mask=m)
+        extra = {}
+        if per_frame_species is not None:
+            extra["species"] = jnp.asarray(per_frame_species[i])
+        elif species is not None:
+            extra["species"] = jnp.asarray(species)
+        if per_frame_subset is not None:
+            extra["subset"] = int(per_frame_subset[i])
+        params = extract_fn(full_vars, r, nbrs_i, mask=m, **extra)
+        params = tree_util.tree_map(np.asarray, params)
+        all_bond_k.append(params["bond_k"])
+        all_bond_r0.append(params["bond_r0"])
+
+    bond_k  = np.stack(all_bond_k)   # [n_sample, B]
+    bond_r0 = np.stack(all_bond_r0)  # [n_sample, B]
+
+    # Per-bond mean across frames (should be constant for table-based model).
+    k_mean  = bond_k.mean(axis=0)   # [B]
+    r0_mean = bond_r0.mean(axis=0)  # [B]
+
+    # Aggregate to unique species pairs.
+    pair_k:  dict = {}
+    pair_r0: dict = {}
+    for pair, bond_ids in pair_to_bonds.items():
+        pair_k[pair]  = float(k_mean[bond_ids].mean())
+        pair_r0[pair] = float(r0_mean[bond_ids].mean())
+
+    r_vals = list(pair_r0.values())
+    r_lo = max(0.01, min(r_vals) - 0.35)
+    r_hi = max(r_vals) + 0.35
+    r_arr = np.linspace(r_lo, r_hi, 300)
+
+    n_pairs = len(pair_to_bonds)
+    fig, ax = plt.subplots(figsize=(6, 4.8), layout="constrained")
+    fig.suptitle(
+        f"MACEBond — Fitted Bond Potentials  ({n_pairs} unique species pairs)",
+        fontsize=11,
+    )
+    ax.set_title("U(r) = ½ k (r − r₀)²")
+    ax.set_xlabel("r  (nm)")
+    ax.set_ylabel("U  (kJ mol⁻¹)")
+
+    cmap = plt.cm.tab10
+    for color_idx, (pair, bond_ids) in enumerate(sorted(pair_to_bonds.items())):
+        s_i, s_j = pair
+        k  = pair_k[pair]
+        r0 = pair_r0[pair]
+        color = cmap(color_idx % 10)
+        U = 0.5 * k * (r_arr - r0) ** 2
+        n_bonds_of_type = len(bond_ids)
+        label = (
+            f"Species {s_i}–{s_j}  "
+            f"k={k:.1f}  r₀={r0:.3f} nm"
+            + (f"  (×{n_bonds_of_type})" if n_bonds_of_type > 1 else "")
+        )
+        ax.plot(r_arr, U, color=color, label=label)
+        ax.axvline(r0, color=color, linestyle=":", linewidth=0.8, alpha=0.6)
+
+    u_max = max(
+        0.5 * pair_k[p] * max(abs(r_lo - pair_r0[p]), abs(r_hi - pair_r0[p])) ** 2
+        for p in pair_to_bonds
+    ) if pair_to_bonds else 1.0
+    if not math.isfinite(u_max) or u_max <= 0:
+        u_max = 1.0
+    ax.set_ylim(0, min(u_max * 1.1, u_max * 4))
+    ax.legend(fontsize=7, frameon=False, loc="upper center")
+
+    fname = f"{output_dir}/bond_potentials.png"
+    fig.savefig(fname, dpi=150)
+    plt.close(fig)
+    print(f"Bond potential plot saved to {fname}")
     return fname

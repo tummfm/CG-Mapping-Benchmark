@@ -32,7 +32,9 @@ def plot_rdf(
     mode="single",
     n_std=1.0,
     show_legend=True,
+    legend_loc="lower right",
     save_pdf=True,
+    save_png=False,
 ):
     """
     Plot RDF data with optional multi-chain mean and std shading.
@@ -61,7 +63,7 @@ def plot_rdf(
     for bead_combo in bead_combinations:
         if bead_combo not in rdf_data:
             continue
-        
+
         if len(bead_combo) == 3:
             type1, type2, type3 = bead_combo
             combo_label = f"{type1}-{type2}-{type3}"
@@ -110,19 +112,23 @@ def plot_rdf(
 
         # Formatting
         ax.set_xlabel("r (nm)", fontsize=axis_label_font_size)
-        ax.set_xlim(0.3, r_max)
         ax.set_ylabel(f"g$_{combo_label}$(r)", fontsize=axis_label_font_size)
         if show_legend:
-            ax.legend(frameon=False, fontsize=legend_font_size, loc="lower right")
+            ax.legend(frameon=False, fontsize=legend_font_size, loc=legend_loc)
         ax.tick_params(direction="in", labelsize=tick_font_size)
 
-        filename = f"{output_prefix}_{combo_label}.pdf"
         plt.tight_layout()
         if save_pdf:
+            filename = f"{output_prefix}_{combo_label}.pdf"
             plt.savefig(filename, format="pdf", dpi=300, bbox_inches="tight")
             print(f"Saved RDF plot for {combo_label} pairs to {filename}")
+        if save_png:
+            filename = f"{output_prefix}_{combo_label}.png"
+            plt.savefig(filename, format="png", dpi=300, bbox_inches="tight")
+            print(f"Saved RDF plot for {combo_label} pairs to {filename}")
+        plt.close(fig)
 
-    print(f"Generated {len(bead_combinations)} RDF plots saved as PDF files.")
+    print(f"Generated {len(bead_combinations)} RDF plots.")
 
 
 def plot_ramachandran(
@@ -316,9 +322,7 @@ def plot_histogram_free_energy(
     feather_sigma = float(edge_feather_bins)
     support_blur = gaussian_filter(valid, sigma=feather_sigma)
 
-    alpha = np.clip(
-        (support_blur - alpha_min) / max(1e-9, (1.0 - alpha_min)), 0.0, 1.0
-    )
+    alpha = np.clip((support_blur - alpha_min) / max(1e-9, (1.0 - alpha_min)), 0.0, 1.0)
     F_out = np.where(alpha > 0, F, np.nan)
 
     # Colormap

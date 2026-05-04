@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cgbench"
+version = "0.1.0"
+description = "CG-Mapping-Benchmark"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py",
+    "mace-torch",
+    "cuequivariance==0.7.0",
+    "cuequivariance-jax==0.7.0",
+    "cuequivariance-ops-cu12==0.7.0",
+    "cuequivariance-ops-jax-cu12==0.7.0"
+]
+
+[tool.setuptools]
+packages = ["cgbench"]
